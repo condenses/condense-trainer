@@ -53,10 +53,10 @@ class LitCondenseLLM(L.LightningModule):
             torch.randn(1, self.num_condense_tokens, self.hidden_size)
         )
         self.bos_token = self.target_decoder.get_input_embeddings()(torch.tensor(self.separate_tokenizer.bos_token_id).to(self.target_decoder.device)).unsqueeze(0).unsqueeze(0)
-        print(self.bos_token.shape)
+        print(self.bos_token.device)
         self.ae_token = nn.Parameter(
             torch.randn(1, 1, self.hidden_size)
-        )
+        ).to(self.target_decoder.device)
         self.linear = nn.Linear(self.hidden_size * self.n_last_hidden_states, self.base_model_hidden_size, bias=True)
         self._init_weights(self.linear)
         self._init_weights(self.norm)
