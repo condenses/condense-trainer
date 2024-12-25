@@ -15,8 +15,8 @@ parser.add_argument("--max_characters", type=int, default=10000, help="Maximum n
 parser.add_argument("--batch_size", type=int, default=1, help="Training batch size")
 parser.add_argument("--num_workers", type=int, default=8, help="Number of dataloader workers")
 parser.add_argument("--dataset_id", type=str, default="Condense-AI/benchmark-condense-v0.1", help="Dataset to use")
-parser.add_argument("--model_id", type=str, default=None, help="Model ID to use")
-parser.add_argument("--target_model_id", type=str, default=None, help="Target model ID to use")
+parser.add_argument("--model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model ID to use")
+parser.add_argument("--target_model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Target model ID to use")
 args = parser.parse_args()
 
 num_condense_tokens = args.num_condense_tokens

@@ -19,7 +19,7 @@ class SubnetSyntheticDataset(Dataset):
         split="train"
     ):
         # Load full training dataset since only train split exists
-        full_dataset = load_dataset(dataset_id, split="train", streaming=False)
+        full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
         # full_dataset = full_dataset.filter(lambda x: x["task"] == "question_answering")
         full_dataset = full_dataset.shuffle(seed=42)
         # Split into train/test based on split parameter
@@ -38,12 +38,10 @@ class SubnetSyntheticDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        context = item["context"]
-        activation_prompt = item["activation_prompt"]
-        expected_completion = item["expected_completion"]
+        context = item["text"]
         output = self.tokenizer(
             context,
-            add_special_tokens=False,
+            add_special_tokens=True,
             return_tensors="pt",
             max_length=self.max_length,
             padding="max_length",
@@ -52,29 +50,13 @@ class SubnetSyntheticDataset(Dataset):
         )
         context_ids = output.input_ids
         context_mask = output.attention_mask
-        full_completion = activation_prompt + expected_completion
-        expected_completion_ids = self.separate_tokenizer.encode(
-            full_completion,
-            add_special_tokens=False,
-            return_tensors="pt",
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-        )
-        activation_prompt_ids = self.separate_tokenizer.encode(
-            activation_prompt,
-            add_special_tokens=False,
-            return_tensors="pt",
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-        )
+        # Remove bos token from labels
+        labels = context_ids[:,1:]
 
         return {
-            "context": context_ids.squeeze(0),
-            "context_mask": context_mask.squeeze(0),
-            "uncondensed": expected_completion_ids.squeeze(0),
-            "activation_prompt": activation_prompt_ids.squeeze(0),
+            "input_ids": context_ids.squeeze(0),
+            "attention_mask": context_mask.squeeze(0),
+            "labels": labels.squeeze(0),
             "str_context": context,
-            "str_uncondensed": full_completion,
+            "str_uncondensed": self.separate_tokenizer.decode(labels.squeeze(0)),
         }
