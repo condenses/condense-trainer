@@ -225,6 +225,10 @@ class LitCondenseLLM(L.LightningModule):
             {
                 'params': self.model.parameters(),
                 'lr': 1e-4  # Lower learning rate for base model
+            },
+            {
+                "params": self.ae_token,
+                "lr": 1e-4
             }
         ]
         optimizer = torch.optim.AdamW(
