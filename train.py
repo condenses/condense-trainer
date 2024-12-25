@@ -17,6 +17,7 @@ parser.add_argument("--num_workers", type=int, default=8, help="Number of datalo
 parser.add_argument("--dataset_id", type=str, default="Condense-AI/benchmark-condense-v0.1", help="Dataset to use")
 parser.add_argument("--model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model ID to use")
 parser.add_argument("--target_model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Target model ID to use")
+parser.add_argument("--devices", type=int, default=-1, help="Number of devices to use")
 args = parser.parse_args()
 
 num_condense_tokens = args.num_condense_tokens
@@ -70,6 +71,7 @@ trainer = Trainer(
     logger=wandb_logger,
     val_check_interval=500,
     limit_val_batches=100,
+    devices=args.devices,
 )
 
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)

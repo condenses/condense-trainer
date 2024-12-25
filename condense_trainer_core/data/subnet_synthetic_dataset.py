@@ -19,7 +19,7 @@ class SubnetSyntheticDataset(Dataset):
         split="train"
     ):
         # Load full training dataset since only train split exists
-        full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train")
+        full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
         # full_dataset = full_dataset.filter(lambda x: x["task"] == "question_answering")
         full_dataset = full_dataset.shuffle(seed=42)
         # Split into train/test based on split parameter
