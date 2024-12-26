@@ -41,7 +41,7 @@ class SubnetSyntheticDataset(Dataset):
         context = item["text"]
         output = self.tokenizer(
             context,
-            add_special_tokens=True,
+            add_special_tokens=False,
             return_tensors="pt",
             max_length=self.max_length,
             padding="max_length",
@@ -51,7 +51,7 @@ class SubnetSyntheticDataset(Dataset):
         context_ids = output.input_ids
         context_mask = output.attention_mask
         # Remove bos token from labels
-        labels = context_ids[:,1:]
+        labels = context_ids
 
         return {
             "input_ids": context_ids.squeeze(0),
