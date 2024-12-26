@@ -2,7 +2,6 @@ from condense_trainer_core import LitCondenseLLM, SubnetSyntheticDataset
 from lightning import Trainer
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
-import torch
 import argparse
 wandb_logger = WandbLogger(project="Condense")
 
@@ -43,23 +42,25 @@ else:
         model_id=model_id,
         target_model_id=target_model_id,
         num_condense_tokens=num_condense_tokens,
-        n_last_hidden_states=2
+        lora_r=128,
+        lora_alpha=128,
+        lora_dropout=0.1,
     )
 
 tokenizer = lit_model.tokenizer
-separate_tokenizer = lit_model.separate_tokenizer
+target_tokenizer = lit_model.target_tokenizer
 
 # Set padding token
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
-if separate_tokenizer.pad_token is None:
-    separate_tokenizer.pad_token = separate_tokenizer.eos_token
+if target_tokenizer.pad_token is None:
+    target_tokenizer.pad_token = target_tokenizer.eos_token
 
 train_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, separate_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
+    dataset_id, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
 )
 validation_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, separate_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
+    dataset_id, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
 )
 
 trainer = Trainer(

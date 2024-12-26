@@ -51,12 +51,10 @@ class SubnetSyntheticDataset(Dataset):
         context_ids = output.input_ids
         context_mask = output.attention_mask
         # Remove bos token from labels
-        labels = context_ids
 
         return {
             "input_ids": context_ids.squeeze(0),
             "attention_mask": context_mask.squeeze(0),
-            "labels": labels.squeeze(0),
             "str_context": context,
-            "str_uncondensed": self.separate_tokenizer.decode(labels.squeeze(0)),
+            "str_uncondensed": self.separate_tokenizer.decode(context_ids.squeeze(0)),
         }
