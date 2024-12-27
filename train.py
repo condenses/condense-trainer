@@ -3,6 +3,7 @@ from lightning import Trainer
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 import argparse
+from datasets import load_dataset
 wandb_logger = WandbLogger(project="Condense")
 
 parser = argparse.ArgumentParser()
@@ -25,8 +26,8 @@ max_characters = args.max_characters
 
 dataset_id = args.dataset_id
 if args.test:
-    model_id = "HuggingFaceTB/SmolLM2-135M"
-    target_model_id = "HuggingFaceTB/SmolLM2-135M"
+    model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+    target_model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
 else:
     model_id = args.model_id
     target_model_id = args.target_model_id
@@ -34,38 +35,47 @@ else:
 print(f"Model ID: {model_id}")
 print(f"Target Model ID: {target_model_id}")
 print(f"Pretrained ID: {args.pretrained_id}")
-
-if args.pretrained_id is not None:
-    lit_model = LitCondenseLLM.from_pretrained(model_id, target_model_id, args.pretrained_id)
-else:
-    lit_model = LitCondenseLLM(
-        model_id=model_id,
-        target_model_id=target_model_id,
-        num_condense_tokens=num_condense_tokens,
-        lora_r=128,
-        lora_alpha=128,
-        lora_dropout=0.1,
-    )
+lit_model = LitCondenseLLM(
+    model_id=model_id,
+    pretrained_id=args.pretrained_id,
+    target_model_id=target_model_id,
+    num_condense_tokens=num_condense_tokens,
+    lora_r=512,
+    lora_alpha=512,
+    lora_dropout=0.1,
+)
 
 tokenizer = lit_model.tokenizer
 target_tokenizer = lit_model.target_tokenizer
 
 # Set padding token
+# Create new padding token
 if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.add_special_tokens({"pad_token": "<pad>"})
 if target_tokenizer.pad_token is None:
-    target_tokenizer.pad_token = target_tokenizer.eos_token
+    target_tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
+# full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
+# full_dataset = full_dataset.shuffle(seed=42)
+# full_dataset = full_dataset.select(range(0, 100000))
+# full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 5000)
+
+full_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
+full_dataset = full_dataset.shuffle(seed=42)
+full_dataset = full_dataset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)}, num_proc=8)
+full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
+print(len(full_dataset))
+print(full_dataset[0]["text"])
 train_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
+    full_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
 )
 validation_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
+    full_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
 )
 
 trainer = Trainer(
     max_epochs=10,
-    precision="bf16",
+    precision="bf16-true",
     gradient_clip_val=1.0,
     log_every_n_steps=5,
     check_val_every_n_epoch=1,

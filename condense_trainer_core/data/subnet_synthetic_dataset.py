@@ -10,7 +10,7 @@ class SubnetSyntheticDataset(Dataset):
 
     def __init__(
         self,
-        dataset_id: str,
+        dataset,
         tokenizer: LlamaTokenizer,
         separate_tokenizer: LlamaTokenizer,
         num_condense_tokens=512,
@@ -19,14 +19,12 @@ class SubnetSyntheticDataset(Dataset):
         split="train"
     ):
         # Load full training dataset since only train split exists
-        full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
-        # full_dataset = full_dataset.filter(lambda x: x["task"] == "question_answering")
-        full_dataset = full_dataset.shuffle(seed=42)
+        self.full_dataset = dataset
         # Split into train/test based on split parameter
         if split == "train":
-            self.dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
+            self.dataset = self.full_dataset.select(range(0, int(0.9 * len(self.full_dataset))))
         else:
-            self.dataset = full_dataset.select(range(int(0.1 * len(full_dataset)), len(full_dataset)))
+            self.dataset = self.full_dataset.select(range(int(0.1 * len(self.full_dataset)), len(self.full_dataset)))
             
         self.tokenizer = tokenizer
         self.num_condense_tokens = num_condense_tokens
