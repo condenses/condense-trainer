@@ -55,6 +55,8 @@ class LitCondenseLLM(L.LightningModule):
         self.commit_description = (f"Condenser-{model_id.split('/')[-1]}, {target_model_id.split('/')[-1]}, "
                                    f"LoRA r={lora_r}, LoRA alpha={lora_alpha}, LoRA dropout={lora_dropout}")
         self.output_dir = output_dir
+        self.tokenizer.add_special_tokens({"pad_token": "<pad>"})
+        self.target_tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     def configure_model(self):
         self.base_model = AutoModelForCausalLM.from_pretrained(self.model_id, attn_implementation="flash_attention_2")
@@ -93,6 +95,10 @@ class LitCondenseLLM(L.LightningModule):
         if self.is_pretrained:
             self.load_pretrained(self.pretrained_id)
 
+        # Resize token embddings
+        self.base_model.resize_token_embeddings(len(self.tokenizer))
+        self.target_model.resize_token_embeddings(len(self.target_tokenizer))
+
     def _initialize_embeddings(self):
         for param in [self.condense_tokens, self.ae_embedding]:
             if isinstance(param, nn.Parameter):
@@ -116,10 +122,24 @@ class LitCondenseLLM(L.LightningModule):
             
             segment_embeds = prompt_embeds[:, start_idx:end_idx, :]
             input_validation_ids = input_ids[:, :end_idx]
+            
+            # Safely handle segment labels
+            if end_idx >= input_ids.size(1):
+                # We've reached the end of the input
+                break
+            
             segment_labels = input_ids[:, end_idx:]
-            if torch.all(segment_labels == self.tokenizer.pad_token_id) or segment_labels.size(1) == 0:
+            
+            # Check if segment_labels is valid before proceeding
+            if segment_labels.size(1) == 0:
                 continue
-            # Skip if segment_labels is full of padding tokens
+            
+            # Check for padding tokens more safely
+            if segment_labels.numel() > 0:
+                is_all_padding = (segment_labels == self.tokenizer.pad_token_id).all()
+                if is_all_padding:
+                    continue
+            
             segment_input_ids.append(input_ids[:, start_idx:end_idx])
             
             segment_mask = attention_mask[:, start_idx:end_idx]
@@ -221,6 +241,11 @@ class LitCondenseLLM(L.LightningModule):
                     generated_text,
                     target_text,
                 ]
+                for sample in validation_sample:
+                    print(sample)
+                    print("-" * 100)
+                print("*" * 100)
+                print("=" * 100)
                 self.text_samples.append(validation_sample)
         return loss
 

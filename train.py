@@ -48,13 +48,6 @@ lit_model = LitCondenseLLM(
 tokenizer = lit_model.tokenizer
 target_tokenizer = lit_model.target_tokenizer
 
-# Set padding token
-# Create new padding token
-if tokenizer.pad_token is None:
-    tokenizer.add_special_tokens({"pad_token": "<pad>"})
-if target_tokenizer.pad_token is None:
-    target_tokenizer.add_special_tokens({"pad_token": "<pad>"})
-
 # full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
 # full_dataset = full_dataset.shuffle(seed=42)
 # full_dataset = full_dataset.select(range(0, 100000))
