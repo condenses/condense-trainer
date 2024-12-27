@@ -29,9 +29,11 @@ class LitCondenseLLM(L.LightningModule):
         lora_r: int = 128,
         lora_alpha: int = 128,
         lora_dropout: float = 0,
-        mean_compression_ratio: float = 2,
+        mean_compression_ratio: float = 1,
+        is_pretraining: bool = False,
     ):
         super().__init__()
+        self.is_pretraining = is_pretraining
         self.lora_config = {
             "r": lora_r,
             "lora_alpha": lora_alpha,
@@ -107,8 +109,8 @@ class LitCondenseLLM(L.LightningModule):
     def forward(self, input_ids, attention_mask) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
         prompt_embeds = self.base_model.get_input_embeddings()(input_ids)
         total_length = prompt_embeds.size(1)
-        num_segments = math.ceil(total_length / (self.num_condense_tokens * self.mean_compression_ratio))
-        segment_length = math.ceil(total_length / num_segments)
+        original_segment_length = self.mean_compression_ratio * self.num_condense_tokens
+        num_segments = math.floor(total_length / original_segment_length)
         
         all_condensed_tokens = []
         level_condensed_tokens = []
@@ -117,8 +119,8 @@ class LitCondenseLLM(L.LightningModule):
         pre_condense_tokens = []
 
         for segment_idx in range(num_segments):
-            start_idx = segment_idx * segment_length
-            end_idx = min((segment_idx + 1) * segment_length, total_length)
+            start_idx = segment_idx * original_segment_length
+            end_idx = min((segment_idx + 1) * original_segment_length, total_length)
             
             segment_embeds = prompt_embeds[:, start_idx:end_idx, :]
             input_validation_ids = input_ids[:, :end_idx]
@@ -163,6 +165,7 @@ class LitCondenseLLM(L.LightningModule):
             level_condensed_tokens.append(current_level_condensed)
             level_segment_labels.append(segment_labels)
             pre_condense_tokens.append(self.tokenizer.decode(input_validation_ids[0], skip_special_tokens=False))
+        
         return level_condensed_tokens, level_segment_labels, pre_condense_tokens
 
     def loss_fn(self, logits, labels):
@@ -228,7 +231,7 @@ class LitCondenseLLM(L.LightningModule):
         loss = torch.stack(losses).mean()
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         if batch_idx < 5:
-            for i in range(len(all_level_input_embeds)):
+            for i in range(len(all_level_input_embeds[:1])):
                 max_length = original_label_length
                 input_embeds = all_level_input_embeds[i]
                 labels = all_level_labels[i]
@@ -266,9 +269,40 @@ class LitCondenseLLM(L.LightningModule):
             val_loss = self.trainer.callback_metrics["val_loss"]
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
-                self._save_checkpoint(val_loss)
+            self._save_checkpoint(val_loss)
         except Exception as e:
             traceback.print_exc()
+
+    def _switch_state(self, state: str):
+        if state == "train":
+            self.base_model.train()
+            self.condense_tokens.requires_grad = True
+            self.ae_embedding.requires_grad = True
+            self.span_concat_embedding.requires_grad = True
+            self.lm_embedding.requires_grad = True
+            self.optimizers().train()
+        elif state == "eval":
+            self.base_model.eval()
+            self.condense_tokens.requires_grad = False
+            self.ae_embedding.requires_grad = False
+            self.span_concat_embedding.requires_grad = False
+            self.lm_embedding.requires_grad = False
+            self.optimizers().eval()
+
+    def on_fit_start(self) -> None:
+        self._switch_state("train")
+
+    def on_predict_start(self) -> None:
+        self._switch_state("eval")
+
+    def on_validation_model_train(self) -> None:
+        self._switch_state("train")
+    
+    def on_validation_model_eval(self) -> None:
+        self._switch_state("eval")
+
+    def on_predict_model_eval(self) -> None:  # redundant with on_predict_start()
+        self._switch_state("eval")
     
     def _save_checkpoint(self, val_loss):
         checkpoint = {
@@ -305,7 +339,7 @@ class LitCondenseLLM(L.LightningModule):
             {'params': [self.condense_tokens, self.ae_embedding, self.span_concat_embedding, self.lm_embedding], 'lr': 1e-4},
             {'params': self.base_model.parameters(), 'lr': 1e-4}
         ]
-        return {"optimizer": torch.optim.AdamW(param_groups)}
+        return {"optimizer": schedulefree.AdamWScheduleFree(param_groups)}
     
     def _initialize_target_model(self, model_name_or_pretrained_path, **kwargs):
         target_model = AutoModelForCausalLM.from_pretrained(model_name_or_pretrained_path, attn_implementation="flash_attention_2")
