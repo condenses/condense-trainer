@@ -60,6 +60,8 @@ class LitCondenseLLM(L.LightningModule):
 
     def configure_model(self):
         self.base_model = AutoModelForCausalLM.from_pretrained(self.model_id, attn_implementation="flash_attention_2")
+        # Resize token embddings
+        self.base_model.resize_token_embeddings(len(self.tokenizer))
         for _, param in self.base_model.named_parameters():
             param.requires_grad = True
         if not self.is_pretrained:    
@@ -74,6 +76,7 @@ class LitCondenseLLM(L.LightningModule):
             self.base_model.print_trainable_parameters()
         self.base_model.gradient_checkpointing_enable()
         self.target_model = self._initialize_target_model(self.target_model_id)
+        self.target_model.resize_token_embeddings(len(self.target_tokenizer))
         self.hidden_size = self.base_model.config.hidden_size
         self.target_hidden_size = self.target_model.config.hidden_size
         # Initialize learnable parameters
@@ -95,9 +98,6 @@ class LitCondenseLLM(L.LightningModule):
         if self.is_pretrained:
             self.load_pretrained(self.pretrained_id)
 
-        # Resize token embddings
-        self.base_model.resize_token_embeddings(len(self.tokenizer))
-        self.target_model.resize_token_embeddings(len(self.target_tokenizer))
 
     def _initialize_embeddings(self):
         for param in [self.condense_tokens, self.ae_embedding]:
@@ -277,6 +277,7 @@ class LitCondenseLLM(L.LightningModule):
                 "ae_embedding": self.ae_embedding.detach().cpu(),
                 "bos_embedding": self.bos_embedding.detach().cpu(),
                 "span_concat_embedding": self.span_concat_embedding.detach().cpu(),
+                "lm_embedding": self.lm_embedding.detach().cpu(),
             },
         }
 
@@ -335,7 +336,10 @@ class LitCondenseLLM(L.LightningModule):
             dtype=dtype,
             device=device
         )
-        self.lm_embedding.data = state_dict["modules"]["lm_embedding"].to(
-            dtype=dtype,
-            device=device
-        )
+        try:
+            self.lm_embedding.data = state_dict["modules"]["lm_embedding"].to(
+                dtype=dtype,
+                device=device
+            )
+        except Exception as e:
+            print(e)
