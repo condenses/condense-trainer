@@ -40,30 +40,35 @@ lit_model = LitCondenseLLM(
     pretrained_id=args.pretrained_id,
     target_model_id=target_model_id,
     num_condense_tokens=num_condense_tokens,
-    lora_r=512,
-    lora_alpha=512,
+    lora_r=64,
+    lora_alpha=64,
     lora_dropout=0.1,
+    mean_compression_ratio=4,
 )
 
 tokenizer = lit_model.tokenizer
 target_tokenizer = lit_model.target_tokenizer
 
 # full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
-# full_dataset = full_dataset.shuffle(seed=42)
-# full_dataset = full_dataset.select(range(0, 100000))
-# full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 5000)
+full_dataset = load_dataset("DKYoon/SlimPajama-6B", split="train", num_proc=16)
+full_dataset = full_dataset.shuffle(seed=100)
 
-full_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
-full_dataset = full_dataset.shuffle(seed=42)
-full_dataset = full_dataset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)}, num_proc=8)
-full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
-print(len(full_dataset))
-print(full_dataset[0]["text"])
+# full_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
+# full_dataset = full_dataset.shuffle(seed=42)
+# full_dataset = full_dataset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)}, num_proc=8)
+# full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
+# print(len(full_dataset))
+# print(full_dataset[0]["text"])
+        # Split into train/test based on split parameter
+
+train_dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
+validation_dataset = full_dataset.select(range(int(0.9 * len(full_dataset)), len(full_dataset)))
+
 train_dataset = SubnetSyntheticDataset(
-    full_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
+    train_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
 )
 validation_dataset = SubnetSyntheticDataset(
-    full_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
+    validation_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
 )
 
 trainer = Trainer(
@@ -74,7 +79,7 @@ trainer = Trainer(
     check_val_every_n_epoch=1,
     logger=wandb_logger,
     val_check_interval=500,
-    limit_val_batches=100,
+    limit_val_batches=1000,
     devices=args.devices,
 )
 

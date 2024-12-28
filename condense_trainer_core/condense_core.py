@@ -29,7 +29,7 @@ class LitCondenseLLM(L.LightningModule):
         lora_r: int = 128,
         lora_alpha: int = 128,
         lora_dropout: float = 0,
-        mean_compression_ratio: float = 1,
+        mean_compression_ratio: float = 4,
         is_pretraining: bool = False,
     ):
         super().__init__()
@@ -112,144 +112,102 @@ class LitCondenseLLM(L.LightningModule):
         original_segment_length = self.mean_compression_ratio * self.num_condense_tokens
         num_segments = math.floor(total_length / original_segment_length)
         
-        all_condensed_tokens = []
-        level_condensed_tokens = []
-        segment_input_ids = []
-        level_segment_labels = []
-        pre_condense_tokens = []
 
-        for segment_idx in range(num_segments):
-            start_idx = segment_idx * original_segment_length
-            end_idx = min((segment_idx + 1) * original_segment_length, total_length)
-            
-            segment_embeds = prompt_embeds[:, start_idx:end_idx, :]
-            input_validation_ids = input_ids[:, :end_idx]
-            
-            # Safely handle segment labels
-            if end_idx >= input_ids.size(1):
-                # We've reached the end of the input
-                break
-            
-            segment_labels = input_ids[:, end_idx:]
-            
-            # Check if segment_labels is valid before proceeding
-            if segment_labels.size(1) == 0:
-                continue
-            
-            # Check for padding tokens more safely
-            if segment_labels.numel() > 0:
-                is_all_padding = (segment_labels == self.tokenizer.pad_token_id).all()
-                if is_all_padding:
-                    continue
-            
-            segment_input_ids.append(input_ids[:, start_idx:end_idx])
-            
-            segment_mask = attention_mask[:, start_idx:end_idx]
-            batch_size = segment_embeds.shape[0]
-            condense_embeds = self.condense_tokens.repeat(batch_size, 1, 1)
-            segment_embeds = torch.cat([segment_embeds, condense_embeds], dim=1)
-            
-            condense_mask = torch.ones((batch_size, self.num_condense_tokens), device=self.device, dtype=torch.bool)
-            segment_mask = torch.cat([segment_mask, condense_mask], dim=1)
-            
-            output = self.base_model(
-                inputs_embeds=segment_embeds, 
-                output_hidden_states=True, 
-                attention_mask=segment_mask
+        input_ids = input_ids[:, :num_segments * original_segment_length]
+        segments_input_ids: list[torch.Tensor] = torch.split(input_ids, original_segment_length, dim=1)
+        attention_mask = attention_mask[:, :num_segments * original_segment_length]
+        segments_attention_mask: list[torch.Tensor] = torch.split(attention_mask, original_segment_length, dim=1)
+        condensed_tokens = []
+        for segment_input_ids, segment_attention_mask in zip(segments_input_ids, segments_attention_mask):
+            segment_prompt_embeds = self.base_model.get_input_embeddings()(segment_input_ids)
+            condense_input_embeds = torch.cat(
+                [
+                    segment_prompt_embeds,
+                    self.condense_tokens.repeat(segment_prompt_embeds.size(0), 1, 1),
+                ],
+                dim=1
             )
-            segment_condensed = output.hidden_states[-1][:, -self.num_condense_tokens:, :]
-            segment_condensed = torch.cat([segment_condensed, self.span_concat_embedding.repeat(batch_size, 1, 1)], dim=1)
-            all_condensed_tokens.append(segment_condensed)
-            current_level_condensed = torch.cat(all_condensed_tokens, dim=1)
-            current_level_condensed = torch.cat([current_level_condensed, self.lm_embedding.repeat(batch_size, 1, 1)], dim=1)
-            level_condensed_tokens.append(current_level_condensed)
-            level_segment_labels.append(segment_labels)
-            pre_condense_tokens.append(self.tokenizer.decode(input_validation_ids[0], skip_special_tokens=False))
-        
-        return level_condensed_tokens, level_segment_labels, pre_condense_tokens
-
+            segment_length = segment_prompt_embeds.size(1)
+            batch_size = segment_prompt_embeds.size(0)
+            # [1, 2, 3, ..., segment_length]
+            position_ids = torch.arange(1,segment_length+1,device=input_ids.device).unsqueeze(0)
+            condense_position_step = segment_length // self.num_condense_tokens
+            # [1, condense_position_step, 2*condense_position_step, ..., segment_length]
+            mem_position_ids = torch.arange(1, segment_length+1, step=condense_position_step, device=input_ids.device).unsqueeze(0)
+            # [1, 2, 3, ..., segment_length, condense_position_step, 2*condense_position_step, ..., segment_length]
+            encode_position_ids = torch.cat([position_ids, mem_position_ids], dim=1)
+            encode_position_ids = encode_position_ids.repeat(batch_size, 1)
+            condense_attention_mask = torch.cat(
+                [
+                    segment_attention_mask,
+                    torch.ones(segment_attention_mask.size(0), self.num_condense_tokens, device=segment_attention_mask.device),
+                ],
+                dim=1
+            )
+            output = self.base_model(
+                inputs_embeds=condense_input_embeds,
+                attention_mask=condense_attention_mask,
+                output_hidden_states=True,
+                position_ids=encode_position_ids,
+            )
+            condensed_tokens.append(output.hidden_states[-1][:, -self.num_condense_tokens:, :])
+        condensed_tokens = torch.cat(condensed_tokens, dim=1)
+        condensed_tokens = torch.cat(
+            [
+                self.bos_embedding.repeat(condensed_tokens.size(0), 1, 1),
+                condensed_tokens,
+                self.ae_embedding.repeat(condensed_tokens.size(0), 1, 1),
+            ],
+            dim=1
+        )
+        return condensed_tokens, input_ids
     def loss_fn(self, logits, labels):
         logits = logits[:, :-1, :].contiguous().view(-1, logits.size(-1))
         labels = labels[:, 1:].contiguous().view(-1)
-        pad_token_id = self.tokenizer.pad_token_id
-        labels[labels == pad_token_id] = -100
+        pad_token_id = self.target_tokenizer.pad_token_id
         labels = labels.long()
-        loss = F.cross_entropy(logits, labels, ignore_index=-100)
+        loss = F.cross_entropy(logits, labels, ignore_index=pad_token_id)
         return loss
 
     def _process_batch(self, batch):
         input_ids = batch["input_ids"]
         attention_mask = batch["attention_mask"]
-        batch_size = input_ids.shape[0]
-        level_condensed_tokens, level_segment_labels, pre_condense_tokens = self.forward(input_ids, attention_mask=attention_mask)
-        all_level_input_embeds = []
-        all_level_labels = []
-        original_label_length = input_ids.size(1)
-
-        for level_tokens, level_labels in zip(level_condensed_tokens, level_segment_labels):
-            condensed_tokens = torch.cat([
-                self.bos_embedding.repeat(batch_size, 1, 1),
-                level_tokens,
-            ], dim=1)
-            target_embeds = self.target_model.get_input_embeddings()(level_labels)
-            ae_labels = self._pad_labels(level_labels, condensed_tokens.size(1))
-            inputs_embeds = torch.cat([condensed_tokens, target_embeds], dim=1)
-            all_level_input_embeds.append(inputs_embeds)
-            all_level_labels.append(ae_labels)
-
-        return all_level_input_embeds, all_level_labels, original_label_length, pre_condense_tokens
-
-    def _pad_labels(self, labels, total_condensed_length):
-        batch_size = labels.shape[0]
-        padding_labels = torch.full((batch_size, total_condensed_length), -100, device=self.device)
-        labels = torch.cat((padding_labels, labels), dim=1)
-        return labels
-
-    def training_step(self, batch):
-        all_level_input_embeds, all_level_labels, original_label_length, pre_condense_tokens = self._process_batch(batch)
-        losses = []
-        for input_embeds, labels in zip(all_level_input_embeds, all_level_labels):
-            output = self.target_model(inputs_embeds=input_embeds)
-            logits = output.logits
-            loss = self.loss_fn(logits, labels)
-            losses.append(loss)
-        loss = torch.stack(losses).mean()
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        return loss
+        condensed_tokens, input_ids = self.forward(input_ids, attention_mask=attention_mask)
+        labels_embeds = self.target_model.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([condensed_tokens, labels_embeds], dim=1)
+        labels = torch.cat(
+            [
+                torch.full((condensed_tokens.size(0), condensed_tokens.size(1)), self.target_tokenizer.pad_token_id, device=input_ids.device),
+                input_ids,
+            ],
+            dim=1
+        )
+        return inputs_embeds, labels, condensed_tokens
     
     def on_validation_start(self):
         self.text_samples = []
 
+    def training_step(self, batch, batch_idx):
+        inputs_embeds, labels, _ = self._process_batch(batch)
+        outputs = self.target_model(inputs_embeds=inputs_embeds)
+        logits = outputs.logits
+        loss = self.loss_fn(logits, labels)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+
     def validation_step(self, batch, batch_idx):
-        all_level_input_embeds, all_level_labels, original_label_length, pre_condense_tokens = self._process_batch(batch)
-        losses = []
-        for input_embeds, labels in zip(all_level_input_embeds, all_level_labels):
-            output = self.target_model(inputs_embeds=input_embeds)
-            logits = output.logits
-            loss = self.loss_fn(logits, labels)
-            losses.append(loss)
-        loss = torch.stack(losses).mean()
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+        inputs_embeds, labels, condensed_tokens = self._process_batch(batch)
+        outputs = self.target_model(inputs_embeds=inputs_embeds)
+        logits = outputs.logits
+        loss = self.loss_fn(logits, labels)
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+
         if batch_idx < 5:
-            for i in range(len(all_level_input_embeds[:1])):
-                max_length = original_label_length
-                input_embeds = all_level_input_embeds[i]
-                labels = all_level_labels[i]
-                input_text = pre_condense_tokens[i]
-                labels[labels==-100] = self.tokenizer.pad_token_id
-                generated_text = self.generate_text(input_embeds, max_length=max_length)
-                target_text = self.tokenizer.decode(labels[0], skip_special_tokens=False)
-                validation_sample = [
-                    input_text,
-                    generated_text,
-                    target_text,
-                ]
-                for sample in validation_sample:
-                    print(sample)
-                    print("-" * 100)
-                print("*" * 100)
-                print("=" * 100)
-                self.text_samples.append(validation_sample)
+            generated_text = self.generate_text(condensed_tokens[:1,:, :])
+            generated_text = generated_text.replace("<pad>", "")
+            ground_truth_text = self.target_tokenizer.decode(labels[0, :], skip_special_tokens=False)
+            ground_truth_text = ground_truth_text.replace("<pad>", "")
+            self.text_samples.append((generated_text, ground_truth_text))
         return loss
 
     def generate_text(self, inputs_embeds, max_length=50):
@@ -258,6 +216,7 @@ class LitCondenseLLM(L.LightningModule):
                 inputs_embeds=inputs_embeds.to("cuda").to(self.target_model.dtype),
                 max_new_tokens=max_length,
                 do_sample=False,
+                use_cache=False,
             )
             return self.target_tokenizer.decode(generated_ids[0], skip_special_tokens=False)
         except Exception as e:
@@ -288,21 +247,6 @@ class LitCondenseLLM(L.LightningModule):
             self.span_concat_embedding.requires_grad = False
             self.lm_embedding.requires_grad = False
             self.optimizers().eval()
-
-    def on_fit_start(self) -> None:
-        self._switch_state("train")
-
-    def on_predict_start(self) -> None:
-        self._switch_state("eval")
-
-    def on_validation_model_train(self) -> None:
-        self._switch_state("train")
-    
-    def on_validation_model_eval(self) -> None:
-        self._switch_state("eval")
-
-    def on_predict_model_eval(self) -> None:  # redundant with on_predict_start()
-        self._switch_state("eval")
     
     def _save_checkpoint(self, val_loss):
         checkpoint = {
@@ -332,14 +276,14 @@ class LitCondenseLLM(L.LightningModule):
         self.base_model.push_to_hub(self.hf_save_repo, commit_message=self.commit_description + f", Val Loss: {val_loss:.6f}")
 
     def on_validation_end(self):
-        self.logger.log_table("generated_samples", data=self.text_samples)
+        self.logger.log_table("Validation Samples", data=self.text_samples, columns=["Generated Text", "Ground Truth Text"])
 
     def configure_optimizers(self):
         param_groups = [
             {'params': [self.condense_tokens, self.ae_embedding, self.span_concat_embedding, self.lm_embedding], 'lr': 1e-4},
             {'params': self.base_model.parameters(), 'lr': 1e-4}
         ]
-        return {"optimizer": schedulefree.AdamWScheduleFree(param_groups)}
+        return {"optimizer": torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.1)}
     
     def _initialize_target_model(self, model_name_or_pretrained_path, **kwargs):
         target_model = AutoModelForCausalLM.from_pretrained(model_name_or_pretrained_path, attn_implementation="flash_attention_2")
