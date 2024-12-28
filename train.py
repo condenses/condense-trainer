@@ -1,5 +1,6 @@
 from condense_trainer_core import LitCondenseLLM, SubnetSyntheticDataset
 from lightning import Trainer
+from lightning.pytorch.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 import argparse
@@ -81,6 +82,7 @@ trainer = Trainer(
     val_check_interval=500,
     limit_val_batches=1000,
     devices=args.devices,
+    strategy=DDPStrategy(find_unused_parameters=False),
 )
 
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)

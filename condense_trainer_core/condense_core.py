@@ -90,12 +90,6 @@ class LitCondenseLLM(L.LightningModule):
         self.ae_embedding = nn.Parameter(
             torch.randn(1, 1, self.hidden_size)
         )
-        self.lm_embedding = nn.Parameter(
-            torch.randn(1, 1, self.hidden_size)
-        )
-        self.span_concat_embedding = nn.Parameter(
-            torch.randn(1, 1, self.hidden_size)
-        )
         self._initialize_embeddings()
         if self.is_pretrained:
             self.load_pretrained(self.pretrained_id)
