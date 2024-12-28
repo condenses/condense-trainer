@@ -16,16 +16,19 @@ class SaveModelHuggingface(Callback):
         
     def setup(self, trainer, pl_module, stage: str) -> None:
         """Initialize HF repo on setup."""
-        self.hf_save_repo = f"Condense-AI/Condenser-{pl_module.model_id.split('/')[-1]}-{time.strftime('%Y%m%d-%H%M%S')}"
-        self.commit_description = (f"Condenser-{pl_module.model_id.split('/')[-1]}, {pl_module.target_model_id.split('/')[-1]}, "
-                                 f"LoRA r={pl_module.lora_config['r']}, LoRA alpha={pl_module.lora_config['lora_alpha']}")
-        
-        # Create the repo
-        self.hf_api.create_repo(
-            repo_id=self.hf_save_repo,
-            repo_type="model",
-            exist_ok=True,
-        )
+        try:
+            self.hf_save_repo = f"Condense-AI/Condenser-{pl_module.model_id.split('/')[-1]}-{time.strftime('%Y%m%d-%H%M%S')}"
+            self.commit_description = (f"Condenser-{pl_module.model_id.split('/')[-1]}, {pl_module.target_model_id.split('/')[-1]}, "
+                                    f"LoRA r={pl_module.lora_config['r']}, LoRA alpha={pl_module.lora_config['lora_alpha']}")
+            
+            # Create the repo
+            self.hf_api.create_repo(
+                repo_id=self.hf_save_repo,
+                repo_type="model",
+                exist_ok=True,
+            )
+        except Exception as e:
+            print(f"Error creating HF repo: {e}")
 
     def on_validation_end(self, trainer, pl_module) -> None:
         checkpoint = {
