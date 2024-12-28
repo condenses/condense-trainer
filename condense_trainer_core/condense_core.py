@@ -206,12 +206,6 @@ class LitCondenseLLM(L.LightningModule):
             traceback.print_exc()
             return "Error generating text"
 
-    def on_validation_epoch_end(self):
-        try:
-            self._save_checkpoint()
-        except Exception as e:
-            traceback.print_exc()
-
     def _switch_state(self, state: str):
         if state == "train":
             self.base_model.train()
@@ -227,34 +221,6 @@ class LitCondenseLLM(L.LightningModule):
             self.span_concat_embedding.requires_grad = False
             self.lm_embedding.requires_grad = False
             self.optimizers().eval()
-    
-    def _save_checkpoint(self):
-        checkpoint = {
-            "modules": {
-                "condense_tokens": self.condense_tokens.detach().cpu(),
-                "ae_embedding": self.ae_embedding.detach().cpu(),
-                "bos_embedding": self.bos_embedding.detach().cpu(),
-            },
-        }
-
-        checkpoint_path = os.path.join(self.output_dir, "modules.pt")
-        os.makedirs(self.output_dir, exist_ok=True)
-        torch.save(checkpoint, checkpoint_path)
-        
-        self.hf_api.create_repo(
-            repo_id=self.hf_save_repo, repo_type="model", exist_ok=True,
-        )
-        self.hf_api.upload_file(
-            path_or_fileobj=checkpoint_path,
-            path_in_repo=checkpoint_path,
-            repo_id=self.hf_save_repo,
-            run_as_future=True,
-            commit_description=self.commit_description,
-        )
-        self.base_model.push_to_hub(self.hf_save_repo, commit_message=self.commit_description)
-
-    # def on_validation_end(self):
-    #     self.logger.log_table("Validation Samples", data=self.text_samples, columns=["Generated Text", "Ground Truth Text"])
 
     def configure_optimizers(self):
         param_groups = [
