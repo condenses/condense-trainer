@@ -127,16 +127,6 @@ class LitCondenseLLM(L.LightningModule):
                 ],
                 dim=1
             )
-            segment_length = segment_prompt_embeds.size(1)
-            batch_size = segment_prompt_embeds.size(0)
-            # [1, 2, 3, ..., segment_length]
-            position_ids = torch.arange(1,segment_length+1,device=input_ids.device).unsqueeze(0)
-            condense_position_step = segment_length // self.num_condense_tokens
-            # [1, condense_position_step, 2*condense_position_step, ..., segment_length]
-            mem_position_ids = torch.arange(1, segment_length+1, step=condense_position_step, device=input_ids.device).unsqueeze(0)
-            # [1, 2, 3, ..., segment_length, condense_position_step, 2*condense_position_step, ..., segment_length]
-            encode_position_ids = torch.cat([position_ids, mem_position_ids], dim=1)
-            encode_position_ids = encode_position_ids.repeat(batch_size, 1)
             condense_attention_mask = torch.cat(
                 [
                     segment_attention_mask,
@@ -148,7 +138,6 @@ class LitCondenseLLM(L.LightningModule):
                 inputs_embeds=condense_input_embeds,
                 attention_mask=condense_attention_mask,
                 output_hidden_states=True,
-                position_ids=encode_position_ids,
             )
             condensed_tokens.append(output.hidden_states[-1][:, -self.num_condense_tokens:, :])
         condensed_tokens = torch.cat(condensed_tokens, dim=1)
