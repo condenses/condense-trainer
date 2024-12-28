@@ -84,7 +84,7 @@ trainer = Trainer(
     limit_val_batches=100,
     devices=args.devices,
     strategy=DDPStrategy(find_unused_parameters=False),
-    callbacks=[SaveModelHuggingface(every_n_epochs=1)],
+    callbacks=[SaveModelHuggingface()],
 )
 
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
