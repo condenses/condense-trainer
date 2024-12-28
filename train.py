@@ -4,6 +4,7 @@ from lightning.pytorch.strategies import DDPStrategy
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 import argparse
+from condense_trainer_core import SaveModelHuggingface
 from datasets import load_dataset
 wandb_logger = WandbLogger(project="Condense")
 
@@ -80,9 +81,10 @@ trainer = Trainer(
     check_val_every_n_epoch=1,
     logger=wandb_logger,
     val_check_interval=500,
-    limit_val_batches=1000,
+    limit_val_batches=100,
     devices=args.devices,
     strategy=DDPStrategy(find_unused_parameters=False),
+    callbacks=[SaveModelHuggingface(every_n_epochs=1)],
 )
 
 train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)

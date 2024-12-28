@@ -175,7 +175,7 @@ class LitCondenseLLM(L.LightningModule):
         outputs = self.target_model(inputs_embeds=inputs_embeds)
         logits = outputs.logits
         loss = self.loss_fn(logits, labels)
-        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -183,7 +183,7 @@ class LitCondenseLLM(L.LightningModule):
         outputs = self.target_model(inputs_embeds=inputs_embeds)
         logits = outputs.logits
         loss = self.loss_fn(logits, labels)
-        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
 
         # if batch_idx < 1:
         #     generated_text = self.generate_text(condensed_tokens[:1,:, :])
@@ -208,10 +208,7 @@ class LitCondenseLLM(L.LightningModule):
 
     def on_validation_epoch_end(self):
         try:
-            val_loss = self.trainer.callback_metrics["val_loss"]
-            if val_loss < self.best_val_loss:
-                self.best_val_loss = val_loss
-            self._save_checkpoint(val_loss)
+            self._save_checkpoint()
         except Exception as e:
             traceback.print_exc()
 
@@ -231,7 +228,7 @@ class LitCondenseLLM(L.LightningModule):
             self.lm_embedding.requires_grad = False
             self.optimizers().eval()
     
-    def _save_checkpoint(self, val_loss):
+    def _save_checkpoint(self):
         checkpoint = {
             "modules": {
                 "condense_tokens": self.condense_tokens.detach().cpu(),
@@ -252,9 +249,9 @@ class LitCondenseLLM(L.LightningModule):
             path_in_repo=checkpoint_path,
             repo_id=self.hf_save_repo,
             run_as_future=True,
-            commit_description=self.commit_description + f", Val Loss: {val_loss:.6f}",
+            commit_description=self.commit_description,
         )
-        self.base_model.push_to_hub(self.hf_save_repo, commit_message=self.commit_description + f", Val Loss: {val_loss:.6f}")
+        self.base_model.push_to_hub(self.hf_save_repo, commit_message=self.commit_description)
 
     # def on_validation_end(self):
     #     self.logger.log_table("Validation Samples", data=self.text_samples, columns=["Generated Text", "Ground Truth Text"])
