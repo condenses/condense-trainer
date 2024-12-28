@@ -191,12 +191,12 @@ class LitCondenseLLM(L.LightningModule):
         loss = self.loss_fn(logits, labels)
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
-        if batch_idx < 5:
-            generated_text = self.generate_text(condensed_tokens[:1,:, :])
-            generated_text = generated_text.replace("<pad>", "")
-            ground_truth_text = self.target_tokenizer.decode(labels[0, :], skip_special_tokens=False)
-            ground_truth_text = ground_truth_text.replace("<pad>", "")
-            self.text_samples.append((generated_text, ground_truth_text))
+        # if batch_idx < 1:
+        #     generated_text = self.generate_text(condensed_tokens[:1,:, :])
+        #     generated_text = generated_text.replace("<pad>", "")
+        #     ground_truth_text = self.target_tokenizer.decode(labels[0, :], skip_special_tokens=False)
+        #     ground_truth_text = ground_truth_text.replace("<pad>", "")
+        #     self.text_samples.append((generated_text, ground_truth_text))
         return loss
 
     def generate_text(self, inputs_embeds, max_length=50):
@@ -264,8 +264,8 @@ class LitCondenseLLM(L.LightningModule):
         )
         self.base_model.push_to_hub(self.hf_save_repo, commit_message=self.commit_description + f", Val Loss: {val_loss:.6f}")
 
-    def on_validation_end(self):
-        self.logger.log_table("Validation Samples", data=self.text_samples, columns=["Generated Text", "Ground Truth Text"])
+    # def on_validation_end(self):
+    #     self.logger.log_table("Validation Samples", data=self.text_samples, columns=["Generated Text", "Ground Truth Text"])
 
     def configure_optimizers(self):
         param_groups = [
