@@ -237,8 +237,6 @@ class LitCondenseLLM(L.LightningModule):
                 "condense_tokens": self.condense_tokens.detach().cpu(),
                 "ae_embedding": self.ae_embedding.detach().cpu(),
                 "bos_embedding": self.bos_embedding.detach().cpu(),
-                "span_concat_embedding": self.span_concat_embedding.detach().cpu(),
-                "lm_embedding": self.lm_embedding.detach().cpu(),
             },
         }
 
@@ -263,7 +261,7 @@ class LitCondenseLLM(L.LightningModule):
 
     def configure_optimizers(self):
         param_groups = [
-            {'params': [self.condense_tokens, self.ae_embedding, self.span_concat_embedding, self.lm_embedding], 'lr': 1e-4},
+            {'params': [self.condense_tokens, self.ae_embedding], 'lr': 1e-4},
             {'params': self.base_model.parameters(), 'lr': 1e-4}
         ]
         return {"optimizer": torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.1)}
