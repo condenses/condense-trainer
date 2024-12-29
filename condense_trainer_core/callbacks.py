@@ -41,7 +41,7 @@ class SaveModelHuggingface(Callback):
 
         # Save locally
         os.makedirs(self.output_dir, exist_ok=True)
-        checkpoint_path = os.path.join(self.output_dir, f"modules_epoch_{trainer.current_epoch}.pt")
+        checkpoint_path = os.path.join(self.output_dir, "modules.pt")
         torch.save(checkpoint, checkpoint_path)
         
         # Upload to HF

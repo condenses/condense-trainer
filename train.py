@@ -6,19 +6,48 @@ from lightning.pytorch.loggers import WandbLogger
 import argparse
 from condense_trainer_core import SaveModelHuggingface
 from datasets import load_dataset
+
 wandb_logger = WandbLogger(project="Condense")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--test", action="store_true", help="Use smaller test models")
-parser.add_argument("--pretrained_id", type=str, default=None, help="HuggingFace repo ID of pretrained model")
-parser.add_argument("--num_condense_tokens", type=int, default=512, help="Number of condense tokens")
-parser.add_argument("--max_tokens", type=int, default=4096, help="Maximum number of tokens")
-parser.add_argument("--max_characters", type=int, default=10000, help="Maximum number of characters")
+parser.add_argument(
+    "--pretrained_id",
+    type=str,
+    default=None,
+    help="HuggingFace repo ID of pretrained model",
+)
+parser.add_argument(
+    "--num_condense_tokens", type=int, default=512, help="Number of condense tokens"
+)
+parser.add_argument(
+    "--max_tokens", type=int, default=4096, help="Maximum number of tokens"
+)
+parser.add_argument(
+    "--max_characters", type=int, default=10000, help="Maximum number of characters"
+)
 parser.add_argument("--batch_size", type=int, default=1, help="Training batch size")
-parser.add_argument("--num_workers", type=int, default=8, help="Number of dataloader workers")
-parser.add_argument("--dataset_id", type=str, default="Condense-AI/benchmark-condense-v0.1", help="Dataset to use")
-parser.add_argument("--model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Model ID to use")
-parser.add_argument("--target_model_id", type=str, default="meta-llama/Llama-3.2-3B-Instruct", help="Target model ID to use")
+parser.add_argument(
+    "--num_workers", type=int, default=8, help="Number of dataloader workers"
+)
+parser.add_argument(
+    "--dataset_id",
+    type=str,
+    default="Condense-AI/benchmark-condense-v0.1",
+    help="Dataset to use",
+)
+parser.add_argument(
+    "--model_id",
+    type=str,
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    help="Model ID to use",
+)
+parser.add_argument(
+    "--target_model_id",
+    type=str,
+    default="meta-llama/Llama-3.2-3B-Instruct",
+    help="Target model ID to use",
+)
 parser.add_argument("--devices", type=int, default=-1, help="Number of devices to use")
 args = parser.parse_args()
 
@@ -42,9 +71,9 @@ lit_model = LitCondenseLLM(
     pretrained_id=args.pretrained_id,
     target_model_id=target_model_id,
     num_condense_tokens=num_condense_tokens,
-    lora_r=64,
-    lora_alpha=64,
-    lora_dropout=0.1,
+    lora_r=512,
+    lora_alpha=512,
+    lora_dropout=0.0,
     mean_compression_ratio=4,
 )
 
@@ -61,16 +90,28 @@ full_dataset = full_dataset.shuffle(seed=100)
 # full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
 # print(len(full_dataset))
 # print(full_dataset[0]["text"])
-        # Split into train/test based on split parameter
+# Split into train/test based on split parameter
 
 train_dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
-validation_dataset = full_dataset.select(range(int(0.9 * len(full_dataset)), len(full_dataset)))
+validation_dataset = full_dataset.select(
+    range(int(0.9 * len(full_dataset)), len(full_dataset))
+)
 
 train_dataset = SubnetSyntheticDataset(
-    train_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
+    train_dataset,
+    tokenizer,
+    target_tokenizer,
+    num_condense_tokens,
+    max_characters,
+    max_length=max_tokens,
 )
 validation_dataset = SubnetSyntheticDataset(
-    validation_dataset, tokenizer, target_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
+    validation_dataset,
+    tokenizer,
+    target_tokenizer,
+    num_condense_tokens,
+    max_characters,
+    max_length=max_tokens,
 )
 
 trainer = Trainer(
@@ -87,7 +128,14 @@ trainer = Trainer(
     callbacks=[SaveModelHuggingface()],
 )
 
-train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-validation_loader = DataLoader(validation_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers)
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=args.batch_size,
+    shuffle=True,
+    num_workers=args.num_workers,
+)
+validation_loader = DataLoader(
+    validation_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers
+)
 
 trainer.fit(lit_model, train_loader, validation_loader)
