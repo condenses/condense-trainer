@@ -93,6 +93,7 @@ full_dataset = full_dataset.shuffle(seed=100)
 # Split into train/test based on split parameter
 
 train_dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
+train_dataset = train_dataset.filter(lambda x: len(x["text"]) > 5000, num_proc=16)
 validation_dataset = full_dataset.select(
     range(int(0.9 * len(full_dataset)), len(full_dataset))
 )

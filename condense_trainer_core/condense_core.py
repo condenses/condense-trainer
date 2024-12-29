@@ -33,11 +33,13 @@ class LitCondenseLLM(L.LightningModule):
         lora_dropout: float = 0.0,
         mean_compression_ratio: float = 4.0,
         is_pretraining: bool = False,
+        continuation_weight: float = 1.0,
     ):
         super().__init__()
         self.is_pretraining = is_pretraining
         self.pretrained_id = pretrained_id
         self.is_pretrained = pretrained_id is not None
+        self.continuation_weight = continuation_weight
 
         # Model IDs
         self.model_id = model_id
@@ -130,6 +132,7 @@ class LitCondenseLLM(L.LightningModule):
             torch.randn(1, self.num_condense_tokens, self.hidden_size)
         )
         self.ae_embedding = nn.Parameter(torch.randn(1, 1, self.hidden_size))
+        self.lm_embedding = nn.Parameter(torch.randn(1, 1, self.hidden_size))
 
         # This is a BOS embedding from target model (frozen)
         self.bos_embedding = self.target_model.get_input_embeddings()(
@@ -169,6 +172,9 @@ class LitCondenseLLM(L.LightningModule):
             condensed_states: [batch_size, total_condensed_tokens, hidden_size]
             clipped_input_ids: truncated input IDs so they align with the segmented logic
             condensed_position_ids: position IDs for the condensed tokens
+            condensed_outputs: list of per-segment condensed outputs
+            segment_input_ids: list of per-segment input IDs
+            segment_attn_masks: list of per-segment attention masks
         """
         # Embeddings
         prompt_embeds = self.base_model.get_input_embeddings()(input_ids)
@@ -254,7 +260,14 @@ class LitCondenseLLM(L.LightningModule):
         all_condensed_pos_ids = torch.cat(all_condensed_pos_ids, dim=0).unsqueeze(0)
         all_condensed_pos_ids = all_condensed_pos_ids.repeat(batch_size, 1)
 
-        return condensed_states, clipped_input_ids, all_condensed_pos_ids
+        return (
+            condensed_states,
+            clipped_input_ids,
+            all_condensed_pos_ids,
+            condensed_outputs,
+            segment_input_ids,
+            segment_attn_masks,
+        )
 
     def _process_batch(self, batch):
         """
@@ -264,9 +277,14 @@ class LitCondenseLLM(L.LightningModule):
         attention_mask = batch["attention_mask"]
 
         # Condensed representations
-        condensed_tokens, clipped_input_ids, condensed_pos_ids = self.forward(
-            input_ids, attention_mask
-        )
+        (
+            condensed_tokens,
+            clipped_input_ids,
+            condensed_pos_ids,
+            condensed_outputs_list,
+            segment_input_ids,
+            segment_attn_masks,
+        ) = self.forward(input_ids, attention_mask)
 
         # Prepare final position_ids for AE step
         seq_len = clipped_input_ids.size(1)
@@ -297,7 +315,88 @@ class LitCondenseLLM(L.LightningModule):
             dim=1,
         )
 
-        return inputs_embeds, labels, condensed_tokens_with_ae, ae_position_ids
+        return (
+            inputs_embeds,
+            labels,
+            condensed_tokens_with_ae,
+            ae_position_ids,
+            condensed_outputs_list,
+            segment_input_ids,
+            segment_attn_masks,
+        )
+
+    def _compute_continuation_loss(
+        self, condensed_outputs_list, segment_input_ids, batch_size: int
+    ):
+        """
+        Compute the multi-level continuation loss.
+        """
+        all_losses = []
+        M = len(condensed_outputs_list)
+
+        for i in range(1, M):
+            # 1) Prompt: cat condensed outputs from segments [0..i-1]
+            level_i_condensed_tokens = torch.cat(condensed_outputs_list[:i], dim=1)
+
+            # Append AE token
+            level_i_condensed_tokens = torch.cat(
+                [level_i_condensed_tokens, self.lm_embedding.repeat(batch_size, 1, 1)],
+                dim=1,
+            )
+
+            # 2) LM targets: cat segment_input_ids from [i..M-1]
+            level_i_lm_targets = torch.cat(segment_input_ids[i:], dim=1)
+            if torch.all(level_i_lm_targets == self.target_tokenizer.pad_token_id):
+                continue
+
+            # 3) Convert to inputs_embeds for target model
+            level_i_inputs_embeds = self.target_model.get_input_embeddings()(
+                level_i_lm_targets
+            )
+
+            # Cat condensed prompt with embeddings
+            final_inputs_embeds = torch.cat(
+                [level_i_condensed_tokens, level_i_inputs_embeds], dim=1
+            )
+
+            # 4) Build labels
+            prompt_length = level_i_condensed_tokens.size(1)
+            labels = torch.cat(
+                [
+                    torch.full(
+                        (batch_size, prompt_length),
+                        self.target_tokenizer.pad_token_id,
+                        device=level_i_lm_targets.device,
+                    ),
+                    level_i_lm_targets,
+                ],
+                dim=1,
+            )
+
+            # 5) Position IDs
+            seq_len = level_i_lm_targets.size(1) + prompt_length
+            position_ids = torch.arange(0, seq_len, device=level_i_lm_targets.device)
+            position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
+            # 6) Forward pass
+            outputs = self.target_model(
+                inputs_embeds=final_inputs_embeds, position_ids=position_ids
+            )
+
+            # 7) Compute loss
+            loss_i = self.loss_fn(outputs.logits, labels)
+            if torch.isnan(loss_i):
+                print(f"Loss is NaN at level {i}")
+                print(f"Labels: {labels}")
+                print(f"Position IDs: {position_ids}")
+            all_losses.append(loss_i)
+
+        # Average across levels
+        if len(all_losses) > 0:
+            continuation_loss = torch.mean(torch.stack(all_losses))
+        else:
+            continuation_loss = torch.tensor(0.0, device=self.device)
+
+        return continuation_loss
 
     def loss_fn(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """
@@ -311,40 +410,118 @@ class LitCondenseLLM(L.LightningModule):
         return F.cross_entropy(logits, labels.long(), ignore_index=pad_token_id)
 
     def training_step(self, batch, batch_idx):
-        inputs_embeds, labels, _, position_ids = self._process_batch(batch)
+        (
+            inputs_embeds,
+            labels,
+            _,
+            position_ids,
+            condensed_outputs_list,
+            segment_input_ids,
+            _,
+        ) = self._process_batch(batch)
+
+        # Reconstruction loss
         outputs = self.target_model(
             inputs_embeds=inputs_embeds, position_ids=position_ids
         )
-        loss = self.loss_fn(outputs.logits, labels)
+        reconstruction_loss = self.loss_fn(outputs.logits, labels)
+
+        # Continuation loss
+        batch_size = labels.size(0)
+        continuation_loss = self._compute_continuation_loss(
+            condensed_outputs_list, segment_input_ids, batch_size
+        )
+
+        # Combined loss
+        total_loss = reconstruction_loss + self.continuation_weight * continuation_loss
+
+        # Log losses
         self.log(
-            "train_loss",
-            loss,
+            "train_loss/reconstruction",
+            reconstruction_loss,
             on_step=True,
             on_epoch=True,
             prog_bar=True,
             sync_dist=True,
         )
-        return loss
+        self.log(
+            "train_loss/continuation",
+            continuation_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "train_loss/total",
+            total_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+
+        return total_loss
 
     def on_validation_start(self):
         self.text_samples = []
 
     def validation_step(self, batch, batch_idx):
-        inputs_embeds, labels, condensed_tokens_with_ae, position_ids = (
-            self._process_batch(batch)
-        )
+        (
+            inputs_embeds,
+            labels,
+            condensed_tokens_with_ae,
+            position_ids,
+            condensed_outputs_list,
+            segment_input_ids,
+            _,
+        ) = self._process_batch(batch)
+
+        # Reconstruction loss
         outputs = self.target_model(
             inputs_embeds=inputs_embeds, position_ids=position_ids
         )
-        loss = self.loss_fn(outputs.logits, labels)
+        reconstruction_loss = self.loss_fn(outputs.logits, labels)
+
+        # Continuation loss
+        batch_size = labels.size(0)
+        continuation_loss = self._compute_continuation_loss(
+            condensed_outputs_list, segment_input_ids, batch_size
+        )
+
+        # Combined loss
+        total_loss = reconstruction_loss + self.continuation_weight * continuation_loss
+
+        # Log losses
         self.log(
-            "val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True
+            "val_loss/reconstruction",
+            reconstruction_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_loss/continuation",
+            continuation_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
+        )
+        self.log(
+            "val_loss/total",
+            total_loss,
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            sync_dist=True,
         )
 
         # Generate some text for the first few batches
         max_generate_batch_size = 1
         if batch_idx < 3:
-            generated_text = self.generate_text(
+            generated_text = self.generate_ae(
                 condensed_tokens_with_ae[:max_generate_batch_size, :, :],
                 position_ids[:max_generate_batch_size, :],
             )
@@ -353,13 +530,15 @@ class LitCondenseLLM(L.LightningModule):
                 labels[0, :], skip_special_tokens=False
             )
             ground_truth_text = ground_truth_text.replace("<pad>", "")
-            self.text_samples.append((generated_text, ground_truth_text))
-            print(generated_text)
-            print("-" * 100)
-            print(ground_truth_text)
-            print("=" * 100)
+            # Generate continuation
+            condensed_tokens = condensed_tokens_with_ae[:max_generate_batch_size, :, :]
+            continuation = self.generate_continuation(
+                condensed_tokens,
+                position_ids[:max_generate_batch_size, : condensed_tokens.size(1)],
+            )
+            self.text_samples.append((generated_text, ground_truth_text, continuation))
 
-        return loss
+        return total_loss
 
     def on_validation_end(self):
         """
@@ -368,10 +547,80 @@ class LitCondenseLLM(L.LightningModule):
         self.logger.log_table(
             "text_samples",
             data=self.text_samples,
-            columns=["Generated Text", "Ground Truth Text"],
+            columns=["Generated Text", "Ground Truth Text", "Continuation"],
         )
 
-    def generate_text(self, inputs_embeds, position_ids, max_length=128):
+    def generate_continuation(self, inputs_embeds, position_ids, max_length=128):
+        """
+        Generates text continuation from condensed embeddings.
+
+        Args:
+            inputs_embeds (torch.Tensor): Condensed token embeddings [batch_size, seq_len, hidden_dim]
+            position_ids (torch.Tensor): Position IDs for the input embeddings [batch_size, seq_len]
+            max_length (int): Maximum number of tokens to generate
+
+        Returns:
+            str: Generated text continuation
+        """
+        try:
+            batch_size = inputs_embeds.size(0)
+            print(position_ids)
+            print(inputs_embeds.shape)
+            # Initial forward pass with condensed embeddings
+            out = self.target_model(
+                position_ids=position_ids,
+                inputs_embeds=inputs_embeds,
+                use_cache=True,
+            )
+
+            past_key_values = out.past_key_values
+            logits = out.logits
+            next_token_id = torch.argmax(logits[:, -1], dim=-1)
+
+            generated_ids = [next_token_id.item()]
+            next_position_ids = position_ids[:, -1:] + 1
+            print(next_position_ids)
+
+            # Get embeddings for the predicted token
+            next_inputs_embeds = (
+                self.target_model.get_input_embeddings()(next_token_id)
+                .unsqueeze(1)
+                .to(inputs_embeds.device)
+            )
+
+            # Auto-regressive generation
+            for _ in range(max_length):
+                out = self.target_model(
+                    position_ids=next_position_ids,
+                    inputs_embeds=next_inputs_embeds,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+
+                logits = out.logits[:, -1]
+                past_key_values = out.past_key_values
+                next_token_id = torch.argmax(logits, dim=-1)
+                generated_ids.append(next_token_id.item())
+
+                # Stop if we hit the end token
+                if next_token_id.item() == self.target_tokenizer.eos_token_id:
+                    break
+
+                # Update for next iteration
+                next_inputs_embeds = (
+                    self.target_model.get_input_embeddings()(next_token_id)
+                    .unsqueeze(1)
+                    .to(inputs_embeds.device)
+                )
+                next_position_ids = next_position_ids + 1
+
+            return self.target_tokenizer.decode(generated_ids, skip_special_tokens=True)
+
+        except Exception as e:
+            traceback.print_exc()
+            return "Error generating continuation"
+
+    def generate_ae(self, inputs_embeds, position_ids, max_length=128):
         """
         Greedy decoding for demonstration. Replace with your preferred generation method.
         """
@@ -432,7 +681,10 @@ class LitCondenseLLM(L.LightningModule):
         Returns AdamW optimizer for both LoRA parameters and the learnable tokens.
         """
         param_groups = [
-            {"params": [self.condense_tokens, self.ae_embedding], "lr": 1e-4},
+            {
+                "params": [self.condense_tokens, self.ae_embedding, self.lm_embedding],
+                "lr": 1e-4,
+            },
             {"params": self.base_model.parameters(), "lr": 1e-4},
         ]
         optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.1)
@@ -451,5 +703,8 @@ class LitCondenseLLM(L.LightningModule):
             dtype=self.dtype, device=self.device
         )
         self.ae_embedding.data = state_dict["modules"]["ae_embedding"].to(
+            dtype=self.dtype, device=self.device
+        )
+        self.lm_embedding.data = state_dict["modules"]["lm_embedding"].to(
             dtype=self.dtype, device=self.device
         )

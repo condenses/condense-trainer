@@ -1,3 +1,3 @@
-from .condensible_casual_lm import CondensibleLM
+from .neural_compressor import NeuralCompressor
 
-__all__ = ["CondensibleLM"]
+__all__ = ["NeuralCompressor"]
