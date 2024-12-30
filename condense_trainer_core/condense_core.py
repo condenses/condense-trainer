@@ -31,7 +31,7 @@ class LitCondenseLLM(L.LightningModule):
         lora_r: int = 128,
         lora_alpha: int = 128,
         lora_dropout: float = 0.0,
-        mean_compression_ratio: float = 4.0,
+        mean_compression_ratio: float = 2.0,
         is_pretraining: bool = False,
         continuation_weight: float = 1.0,
     ):
@@ -88,9 +88,6 @@ class LitCondenseLLM(L.LightningModule):
             ],
         }
 
-        # Prepare model
-        self.configure_model()
-
         # Track best validation loss (optional if you want to monitor improvements)
         self.best_val_loss = float("inf")
 
@@ -133,12 +130,6 @@ class LitCondenseLLM(L.LightningModule):
         )
         self.ae_embedding = nn.Parameter(torch.randn(1, 1, self.hidden_size))
         self.lm_embedding = nn.Parameter(torch.randn(1, 1, self.hidden_size))
-
-        # This is a BOS embedding from target model (frozen)
-        self.bos_embedding = self.target_model.get_input_embeddings()(
-            torch.tensor(self.target_tokenizer.bos_token_id).unsqueeze(0).unsqueeze(0)
-        )
-        self.bos_embedding.requires_grad = False
 
         # Initialize parameter weights
         self._initialize_embeddings()
@@ -326,7 +317,10 @@ class LitCondenseLLM(L.LightningModule):
         )
 
     def _compute_continuation_loss(
-        self, condensed_outputs_list, segment_input_ids, batch_size: int
+        self,
+        condensed_outputs_list,
+        segment_input_ids,
+        batch_size: int,
     ):
         """
         Compute the multi-level continuation loss.
@@ -339,7 +333,7 @@ class LitCondenseLLM(L.LightningModule):
         for i in range(1, M):
             # 1) Prompt: cat condensed outputs from segments [0..i-1]
             level_i_condensed_tokens = torch.cat(condensed_outputs_list[:i], dim=1)
-
+            max_effective_length = 256
             # Append AE token
             level_i_condensed_tokens = torch.cat(
                 [level_i_condensed_tokens, self.lm_embedding.repeat(batch_size, 1, 1)],
@@ -357,6 +351,8 @@ class LitCondenseLLM(L.LightningModule):
                 level_i_lm_targets
             )
 
+            level_i_inputs_embeds = level_i_inputs_embeds[:, :max_effective_length, :]
+            level_i_lm_targets = level_i_lm_targets[:, :max_effective_length]
             # Cat condensed prompt with embeddings
             final_inputs_embeds = torch.cat(
                 [level_i_condensed_tokens, level_i_inputs_embeds], dim=1
@@ -449,7 +445,7 @@ class LitCondenseLLM(L.LightningModule):
 
         # Combined loss
         total_loss = reconstruction_loss + self.continuation_weight * continuation_loss
-
+        # total_loss = reconstruction_loss
         # Log losses
         self.log(
             "train_loss/reconstruction",
@@ -506,9 +502,9 @@ class LitCondenseLLM(L.LightningModule):
             )
         )
 
-        # Combined loss
+        # # Combined loss
         total_loss = reconstruction_loss + self.continuation_weight * continuation_loss
-
+        # total_loss = reconstruction_loss
         # Log losses
         self.log(
             "val_loss/reconstruction",
@@ -605,8 +601,6 @@ class LitCondenseLLM(L.LightningModule):
                     "\n||||||\n".join(continuation_texts),
                 )
             )
-            print(self.text_samples[-1])
-
         return total_loss
 
     def on_validation_end(self):
@@ -733,7 +727,6 @@ class LitCondenseLLM(L.LightningModule):
                     .to(inputs_embeds.device)
                 )
                 next_position_ids = next_position_ids + 1
-                print(next_position_ids)
             return self.target_tokenizer.decode(
                 generated_ids, skip_special_tokens=False
             )

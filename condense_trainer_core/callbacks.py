@@ -37,7 +37,6 @@ class SaveModelHuggingface(Callback):
             "modules": {
                 "condense_tokens": pl_module.condense_tokens.detach().cpu(),
                 "ae_embedding": pl_module.ae_embedding.detach().cpu(),
-                "bos_embedding": pl_module.bos_embedding.detach().cpu(),
                 "lm_embedding": pl_module.lm_embedding.detach().cpu(),
             },
         }

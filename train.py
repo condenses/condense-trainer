@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 import argparse
 from condense_trainer_core import SaveModelHuggingface
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 
 wandb_logger = WandbLogger(project="Condense")
 
@@ -39,15 +39,26 @@ parser.add_argument(
 parser.add_argument(
     "--model_id",
     type=str,
-    default="meta-llama/Llama-3.2-3B-Instruct",
+    default="meta-llama/Llama-3.1-8B-Instruct",
     help="Model ID to use",
 )
 parser.add_argument(
     "--target_model_id",
     type=str,
-    default="meta-llama/Llama-3.2-3B-Instruct",
+    default="meta-llama/Llama-3.1-8B-Instruct",
     help="Target model ID to use",
 )
+
+
+def format_conversations_to_messages(x):
+    messages = []
+    for conversation in x["conversations"]:
+        role = "user" if conversation["from"] == "human" else "assistant"
+        content = conversation["value"]
+        messages.append({"role": role, "content": content})
+    return {"messages": messages}
+
+
 parser.add_argument("--devices", type=int, default=-1, help="Number of devices to use")
 args = parser.parse_args()
 
@@ -74,22 +85,40 @@ lit_model = LitCondenseLLM(
     lora_r=512,
     lora_alpha=512,
     lora_dropout=0.0,
-    mean_compression_ratio=4,
+    mean_compression_ratio=2,
 )
 
 tokenizer = lit_model.tokenizer
 target_tokenizer = lit_model.target_tokenizer
 
 # full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
-full_dataset = load_dataset("DKYoon/SlimPajama-6B", split="train", num_proc=16)
-full_dataset = full_dataset.shuffle(seed=100)
+# full_dataset = load_dataset("DKYoon/SlimPajama-6B", split="train", num_proc=16)
+# full_dataset = full_dataset.shuffle(seed=100)
 
-# full_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
-# full_dataset = full_dataset.shuffle(seed=42)
-# full_dataset = full_dataset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)}, num_proc=8)
-# full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
-# print(len(full_dataset))
-# print(full_dataset[0]["text"])
+full_dataset_1 = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
+full_dataset_1 = full_dataset_1.shuffle(seed=42)
+full_dataset_1 = full_dataset_1.map(
+    lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)},
+    num_proc=8,
+)
+full_dataset_1 = full_dataset_1.filter(lambda x: len(x["text"]) > 2000)
+
+full_dataset_2 = load_dataset(
+    "manifoldlabs/Infinity-Instruct", "0625", split="train", num_proc=16
+)
+full_dataset_2 = full_dataset_2.map(
+    format_conversations_to_messages,
+    num_proc=8,
+)
+full_dataset_2 = full_dataset_2.map(
+    lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)},
+    num_proc=16,
+)
+full_dataset_2 = full_dataset_2.filter(lambda x: len(x["text"]) > 2000, num_proc=16)
+full_dataset = concatenate_datasets([full_dataset_1, full_dataset_2])
+full_dataset = full_dataset.shuffle(seed=42)
+print(len(full_dataset))
+print(full_dataset[0]["text"])
 # Split into train/test based on split parameter
 
 train_dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
@@ -117,7 +146,7 @@ validation_dataset = SubnetSyntheticDataset(
 
 trainer = Trainer(
     max_epochs=10,
-    precision="bf16-true",
+    precision="bf16",
     gradient_clip_val=1.0,
     log_every_n_steps=5,
     check_val_every_n_epoch=1,
@@ -125,8 +154,8 @@ trainer = Trainer(
     val_check_interval=500,
     limit_val_batches=100,
     devices=args.devices,
-    strategy=DDPStrategy(find_unused_parameters=False),
-    callbacks=[SaveModelHuggingface()],
+    strategy=DDPStrategy(find_unused_parameters=True),
+    # callbacks=[SaveModelHuggingface()],
 )
 
 train_loader = DataLoader(
