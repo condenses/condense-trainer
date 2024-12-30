@@ -1,142 +1,172 @@
-from condense_trainer_core import LitCondenseLLM, SubnetSyntheticDataset
-from lightning import Trainer
+import lightning as L
 from lightning.pytorch.strategies import DDPStrategy
-from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
+from torch.utils.data import DataLoader
 import argparse
-from condense_trainer_core import SaveModelHuggingface
-from datasets import load_dataset
+import condense_trainer_core as ct
 
-wandb_logger = WandbLogger(project="Condense")
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--test", action="store_true", help="Use smaller test models")
-parser.add_argument(
-    "--pretrained_id",
-    type=str,
-    default=None,
-    help="HuggingFace repo ID of pretrained model",
-)
-parser.add_argument(
-    "--num_condense_tokens", type=int, default=512, help="Number of condense tokens"
-)
-parser.add_argument(
-    "--max_tokens", type=int, default=4096, help="Maximum number of tokens"
-)
-parser.add_argument(
-    "--max_characters", type=int, default=10000, help="Maximum number of characters"
-)
-parser.add_argument("--batch_size", type=int, default=1, help="Training batch size")
-parser.add_argument(
-    "--num_workers", type=int, default=8, help="Number of dataloader workers"
-)
-parser.add_argument(
-    "--dataset_id",
-    type=str,
-    default="Condense-AI/benchmark-condense-v0.1",
-    help="Dataset to use",
-)
-parser.add_argument(
-    "--model_id",
-    type=str,
-    default="meta-llama/Llama-3.2-3B-Instruct",
-    help="Model ID to use",
-)
-parser.add_argument(
-    "--target_model_id",
-    type=str,
-    default="meta-llama/Llama-3.2-3B-Instruct",
-    help="Target model ID to use",
-)
-parser.add_argument("--devices", type=int, default=-1, help="Number of devices to use")
-args = parser.parse_args()
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Train a CondenseTrainer model")
 
-num_condense_tokens = args.num_condense_tokens
-max_tokens = args.max_tokens
-max_characters = args.max_characters
+    # Model arguments
+    parser.add_argument(
+        "--model-id", default="meta-llama/Llama-3.2-3B-Instruct", help="Base model ID"
+    )
+    parser.add_argument(
+        "--target-model-id",
+        default="meta-llama/Llama-3.2-3B-Instruct",
+        help="Target model ID",
+    )
+    parser.add_argument(
+        "--pretrained-id",
+        default=None,
+        help="Pretrained model ID",
+    )
+    parser.add_argument(
+        "--num-condense-tokens", type=int, default=128, help="Number of condense tokens"
+    )
+    parser.add_argument("--compress-rate", type=int, default=4, help="Compression rate")
+    parser.add_argument(
+        "--max-length", type=int, default=4096, help="Maximum sequence length"
+    )
+    parser.add_argument("--lora-r", type=int, default=512, help="LoRA r parameter")
+    parser.add_argument(
+        "--lora-alpha", type=int, default=512, help="LoRA alpha parameter"
+    )
+    parser.add_argument(
+        "--lora-dropout", type=float, default=0.0, help="LoRA dropout rate"
+    )
 
-dataset_id = args.dataset_id
-if args.test:
-    model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
-    target_model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
-else:
-    model_id = args.model_id
-    target_model_id = args.target_model_id
+    # Training arguments
+    parser.add_argument("--batch-size", type=int, default=1, help="Training batch size")
+    parser.add_argument(
+        "--num-workers", type=int, default=8, help="Number of data loading workers"
+    )
+    parser.add_argument(
+        "--devices", type=int, default=-1, help="Number of devices to use"
+    )
+    parser.add_argument(
+        "--max-epochs", type=int, default=10, help="Maximum number of epochs"
+    )
+    parser.add_argument("--precision", default="bf16-true", help="Training precision")
+    parser.add_argument(
+        "--gradient-clip-val", type=float, default=1.0, help="Gradient clipping value"
+    )
+    parser.add_argument(
+        "--log-every-n-steps", type=int, default=5, help="Log frequency"
+    )
+    parser.add_argument(
+        "--check-val-every-n-epoch",
+        type=int,
+        default=1,
+        help="Validation check frequency",
+    )
+    parser.add_argument(
+        "--val-check-interval", type=int, default=500, help="Validation check interval"
+    )
+    parser.add_argument(
+        "--limit-val-batches",
+        type=int,
+        default=100,
+        help="Number of validation batches",
+    )
 
-print(f"Model ID: {model_id}")
-print(f"Target Model ID: {target_model_id}")
-print(f"Pretrained ID: {args.pretrained_id}")
-lit_model = LitCondenseLLM(
-    model_id=model_id,
-    pretrained_id=args.pretrained_id,
-    target_model_id=target_model_id,
-    num_condense_tokens=num_condense_tokens,
-    lora_r=512,
-    lora_alpha=512,
-    lora_dropout=0.0,
-    mean_compression_ratio=4,
-)
+    # Dataset arguments
+    parser.add_argument(
+        "--min-characters", type=int, default=2000, help="Minimum text length"
+    )
 
-tokenizer = lit_model.tokenizer
-target_tokenizer = lit_model.target_tokenizer
+    # Logging arguments
+    parser.add_argument(
+        "--wandb-project", default="Condense", help="Weights & Biases project name"
+    )
 
-# full_dataset = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", num_proc=8)
-full_dataset = load_dataset("DKYoon/SlimPajama-6B", split="train", num_proc=16)
-full_dataset = full_dataset.shuffle(seed=100)
+    parser.add_argument("--test", action="store_true", help="Run a test run")
 
-# full_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_gen")
-# full_dataset = full_dataset.shuffle(seed=42)
-# full_dataset = full_dataset.map(lambda x: {"text": tokenizer.apply_chat_template(x["messages"], tokenize=False)}, num_proc=8)
-# full_dataset = full_dataset.filter(lambda x: len(x["text"]) > 2000)
-# print(len(full_dataset))
-# print(full_dataset[0]["text"])
-# Split into train/test based on split parameter
+    return parser.parse_args()
 
-train_dataset = full_dataset.select(range(0, int(0.9 * len(full_dataset))))
-train_dataset = train_dataset.filter(lambda x: len(x["text"]) > 5000, num_proc=16)
-validation_dataset = full_dataset.select(
-    range(int(0.9 * len(full_dataset)), len(full_dataset))
-)
 
-train_dataset = SubnetSyntheticDataset(
-    train_dataset,
-    tokenizer,
-    target_tokenizer,
-    num_condense_tokens,
-    max_characters,
-    max_length=max_tokens,
-)
-validation_dataset = SubnetSyntheticDataset(
-    validation_dataset,
-    tokenizer,
-    target_tokenizer,
-    num_condense_tokens,
-    max_characters,
-    max_length=max_tokens,
-)
+def main():
+    """
+    Trains a CondenseTrainer module on a chosen dataset
+    with autoencoding and continuation objectives.
+    """
+    # Parse arguments
+    args = parse_args()
+    if args.test:
+        args.model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
+        args.target_model_id = "HuggingFaceTB/SmolLM2-135M-Instruct"
 
-trainer = Trainer(
-    max_epochs=10,
-    precision="bf16-true",
-    gradient_clip_val=1.0,
-    log_every_n_steps=5,
-    check_val_every_n_epoch=1,
-    logger=wandb_logger,
-    val_check_interval=500,
-    limit_val_batches=100,
-    devices=args.devices,
-    strategy=DDPStrategy(find_unused_parameters=False),
-    callbacks=[SaveModelHuggingface()],
-)
+    print(args)
 
-train_loader = DataLoader(
-    train_dataset,
-    batch_size=args.batch_size,
-    shuffle=True,
-    num_workers=args.num_workers,
-)
-validation_loader = DataLoader(
-    validation_dataset, batch_size=1, shuffle=False, num_workers=args.num_workers
-)
+    wandb_logger = WandbLogger(project=args.wandb_project)
 
-trainer.fit(lit_model, train_loader, validation_loader)
+    # Initialize final trainer with objectives
+    model = ct.condense_trainer.CondenseTrainer(
+        model_id=args.model_id,
+        target_model_id=args.target_model_id,
+        pretrained_id=args.pretrained_id,
+        num_condense_tokens=args.num_condense_tokens,
+        max_seq_length=args.max_length,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        compress_rate=args.compress_rate,
+    )
+
+    full_dataset = ct.data.processed_dataset_loader.load_instruction_dataset(
+        tokenizer=model.target_tokenizer,
+        num_proc=16,
+        seed=42,
+        min_characters=args.min_characters,
+    )
+    split = full_dataset.train_test_split(test_size=0.1)
+    train_dataset = split["train"]
+    valid_dataset = split["test"]
+    train_dataset = ct.data.TextDataset(
+        train_dataset,
+        tokenizer=model.target_tokenizer,
+        max_length=args.max_length,
+    )
+    valid_dataset = ct.data.TextDataset(
+        valid_dataset,
+        tokenizer=model.target_tokenizer,
+        max_length=args.max_length,
+    )
+
+    # DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+    )
+    valid_loader = DataLoader(
+        valid_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=args.num_workers,
+    )
+
+    # Lightning Trainer
+    trainer = L.Trainer(
+        max_epochs=args.max_epochs,
+        precision=args.precision,
+        gradient_clip_val=args.gradient_clip_val,
+        log_every_n_steps=args.log_every_n_steps,
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
+        logger=wandb_logger,
+        val_check_interval=args.val_check_interval,
+        limit_val_batches=args.limit_val_batches,
+        devices=args.devices,
+        strategy=DDPStrategy(find_unused_parameters=False),
+        callbacks=[ct.callbacks.SaveModelHuggingface()],
+    )
+
+    trainer.fit(model, train_loader, valid_loader)
+
+
+if __name__ == "__main__":
+    main()

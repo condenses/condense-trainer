@@ -1,34 +1,36 @@
 from torch.utils.data import Dataset
-from datasets import Dataset as HuggingFaceDataset
 from transformers import LlamaTokenizer
-import torch
-import traceback
-from datasets import load_dataset
 
 
-class SubnetSyntheticDataset(Dataset):
+class TextDataset(Dataset):
+    """
+    A dataset that wraps text samples, tokenizing them for
+    usage by a condense mechanism and a separate target model.
+    """
 
     def __init__(
         self,
         dataset,
         tokenizer: LlamaTokenizer,
-        separate_tokenizer: LlamaTokenizer,
-        num_condense_tokens=512,
-        max_characters=10000,
         max_length=2048,
     ):
+        """
+        Args:
+            dataset: An iterable or HuggingFace dataset of text samples.
+            tokenizer: Tokenizer for the base model.
+            max_length: Max token length after tokenization.
+        """
         self.dataset = dataset
         self.tokenizer = tokenizer
-        self.num_condense_tokens = num_condense_tokens
-        self.max_characters = max_characters
         self.max_length = max_length
-        self.separate_tokenizer = separate_tokenizer
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, idx):
         item = self.dataset[idx]
         context = item["text"]
+
         output = self.tokenizer(
             context,
             add_special_tokens=False,
@@ -38,13 +40,11 @@ class SubnetSyntheticDataset(Dataset):
             truncation=True,
             return_attention_mask=True,
         )
+
         context_ids = output.input_ids
         context_mask = output.attention_mask
-        # Remove bos token from labels
 
         return {
             "input_ids": context_ids.squeeze(0),
             "attention_mask": context_mask.squeeze(0),
-            "str_context": context,
-            "str_uncondensed": self.separate_tokenizer.decode(context_ids.squeeze(0)),
         }
