@@ -13,6 +13,7 @@ from transformers import (
     AutoModelForCausalLM,
 )
 from peft import get_peft_model, LoraConfig, PeftModel
+from cut_cross_entropy.transformers import cce_patch
 
 
 class LitCondenseLLM(L.LightningModule):
@@ -152,6 +153,8 @@ class LitCondenseLLM(L.LightningModule):
         target_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
         for _, param in target_model.named_parameters():
             param.requires_grad = False
+
+        target_model = cce_patch(target_model)
 
         return target_model
 
@@ -376,9 +379,13 @@ class LitCondenseLLM(L.LightningModule):
             seq_len = level_i_lm_targets.size(1) + prompt_length
             position_ids = torch.arange(0, seq_len, device=level_i_lm_targets.device)
             position_ids = position_ids.unsqueeze(0).repeat(batch_size, 1)
+
+            labels[labels == self.target_tokenizer.pad_token_id] = -100
             # 6) Forward pass
             outputs = self.target_model(
-                inputs_embeds=final_inputs_embeds, position_ids=position_ids
+                inputs_embeds=final_inputs_embeds,
+                position_ids=position_ids,
+                labels=labels,
             )
 
             all_level_inputs_to_generate.append(
@@ -391,7 +398,7 @@ class LitCondenseLLM(L.LightningModule):
             )
 
             # 7) Compute loss
-            loss_i = self.loss_fn(outputs.logits, labels)
+            loss_i = outputs.loss
             if torch.isnan(loss_i):
                 print(f"Loss is NaN at level {i}")
                 print(f"Labels: {labels}")
@@ -432,10 +439,11 @@ class LitCondenseLLM(L.LightningModule):
         ) = self._process_batch(batch)
 
         # Reconstruction loss
+        labels[labels == self.target_tokenizer.pad_token_id] = -100
         outputs = self.target_model(
-            inputs_embeds=inputs_embeds, position_ids=position_ids
+            inputs_embeds=inputs_embeds, position_ids=position_ids, labels=labels
         )
-        reconstruction_loss = self.loss_fn(outputs.logits, labels)
+        reconstruction_loss = outputs.loss
 
         # Continuation loss
         batch_size = labels.size(0)
@@ -489,10 +497,12 @@ class LitCondenseLLM(L.LightningModule):
         ) = self._process_batch(batch)
 
         # Reconstruction loss
+        original_labels = labels.clone()
+        labels[labels == self.target_tokenizer.pad_token_id] = -100
         outputs = self.target_model(
-            inputs_embeds=inputs_embeds, position_ids=position_ids
+            inputs_embeds=inputs_embeds, position_ids=position_ids, labels=labels
         )
-        reconstruction_loss = self.loss_fn(outputs.logits, labels)
+        reconstruction_loss = outputs.loss
 
         # Continuation loss
         batch_size = labels.size(0)
@@ -542,7 +552,7 @@ class LitCondenseLLM(L.LightningModule):
             )
             generated_text = generated_text.replace("<pad>", "")
             ground_truth_text = self.target_tokenizer.decode(
-                labels[0, :], skip_special_tokens=False
+                original_labels[0, :], skip_special_tokens=False
             )
             ground_truth_text = ground_truth_text.replace("<pad>", "")
             # Generate continuation

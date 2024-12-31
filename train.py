@@ -146,7 +146,7 @@ validation_dataset = SubnetSyntheticDataset(
 
 trainer = Trainer(
     max_epochs=10,
-    precision="bf16",
+    precision="bf16-true",
     gradient_clip_val=1.0,
     log_every_n_steps=5,
     check_val_every_n_epoch=1,
