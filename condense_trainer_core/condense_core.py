@@ -14,6 +14,16 @@ from transformers import (
 )
 from peft import get_peft_model, LoraConfig, PeftModel
 from cut_cross_entropy.transformers import cce_patch
+from transformers import BitsAndBytesConfig
+from peft import prepare_model_for_kbit_training
+
+
+config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.bfloat16,
+)
 
 
 class LitCondenseLLM(L.LightningModule):
@@ -97,12 +107,12 @@ class LitCondenseLLM(L.LightningModule):
         Sets up the base model (with or without LoRA), target model, and embeddings.
         """
         # Base model
-        self.base_model = AutoModelForCausalLM.from_pretrained(self.model_id)
+        self.base_model = AutoModelForCausalLM.from_pretrained(
+            self.model_id, quantization_config=config, torch_dtype="auto"
+        )
         self.base_model.resize_token_embeddings(len(self.tokenizer))
 
-        # Enable gradient on all parameters (which later might be masked by LoRA)
-        for _, param in self.base_model.named_parameters():
-            param.requires_grad = True
+        self.base_model = prepare_model_for_kbit_training(self.base_model)
 
         # Wrap base model in LoRA, or load pretrained LoRA weights
         if not self.is_pretrained:
@@ -150,7 +160,11 @@ class LitCondenseLLM(L.LightningModule):
         """
         Loads the target model and freezes its parameters.
         """
-        target_model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
+        target_model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            quantization_config=config,
+            torch_dtype="auto",
+        )
         for _, param in target_model.named_parameters():
             param.requires_grad = False
 
