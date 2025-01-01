@@ -25,7 +25,7 @@ class LitModel(L.LightningModule):
     def configure_model(self):
         logger.info("Loading model...")
         self.model = MultiSpanGistCausalLM(
-            **self.model_config,
+            **self.model_config, 
         )
         logger.info("Loading target model...")
         self.target_model = AutoModelForCausalLM.from_pretrained(

@@ -1,4 +1,4 @@
-from . import trainer, modeling, data
+from . import lit, modeling, data
 
-__all__ = ["trainer", "modeling", "data"]
+__all__ = ["lit", "modeling", "data"]
 

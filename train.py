@@ -1,4 +1,4 @@
-from compress.trainer import LitModel
+from compress.lit import LitModel
 from compress.data import PretrainDataset, load_processed_dataset
 from loguru import logger
 from lightning import Trainer as LTrainer

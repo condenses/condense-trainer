@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, PretrainedConfig
 from .objectives import auto_encoding
+from peft import get_peft_model, LoraConfig
 
 
 class ModelConfig(PretrainedConfig):
@@ -19,7 +20,10 @@ class GistCausalLM(nn.Module):
     """
 
     def __init__(
-        self, model: AutoModelForCausalLM, num_gist_tokens: int, max_length: int
+        self,
+        model: AutoModelForCausalLM,
+        num_gist_tokens: int,
+        max_length: int,
     ):
         super().__init__()
         assert num_gist_tokens > 0, "num_gist_tokens must be > 0."
@@ -28,7 +32,6 @@ class GistCausalLM(nn.Module):
         assert (
             max_length % num_gist_tokens == 0
         ), "max_length must be divisible by num_gist_tokens."
-
         self.model = model
         self.num_gist_tokens = num_gist_tokens
         self.max_length = max_length
@@ -181,6 +184,7 @@ class MultiSpanGistCausalLM(nn.Module):
         max_length: int,
         num_auto_encoding_flag: int = 1,
         num_complete_flag: int = 1,
+        peft_config: dict = None,
         **kwargs,
     ):
         super().__init__()
@@ -188,6 +192,10 @@ class MultiSpanGistCausalLM(nn.Module):
         self.num_gist_tokens = num_gist_tokens
         self.max_length = max_length
         self.gist_model = GistCausalLM(self.model, num_gist_tokens, max_length)
+
+        if peft_config is not None:
+            self.model = get_peft_model(self.model, LoraConfig(**peft_config))
+            self.model.print_trainable_parameters()
 
         # Extra learnable flags
         hidden_size = self.model.config.hidden_size
