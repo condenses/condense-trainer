@@ -1,6 +1,15 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, PretrainedConfig
+from .objectives import auto_encoding
+
+
+class ModelConfig(PretrainedConfig):
+    llm_model_id: str
+    num_gist_tokens: int
+    max_length: int
+    num_auto_encoding_flag: int
+    num_complete_flag: int
 
 
 class GistCausalLM(nn.Module):
@@ -172,6 +181,7 @@ class MultiSpanGistCausalLM(nn.Module):
         max_length: int,
         num_auto_encoding_flag: int = 1,
         num_complete_flag: int = 1,
+        **kwargs,
     ):
         super().__init__()
         self.model = AutoModelForCausalLM.from_pretrained(llm_model_id)
@@ -188,16 +198,20 @@ class MultiSpanGistCausalLM(nn.Module):
         self.num_auto_encoding_flag = num_auto_encoding_flag
         self.num_complete_flag = num_complete_flag
 
+    def resize_token_embeddings(self, new_num_tokens: int):
+        self.model.resize_token_embeddings(new_num_tokens)
+
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """
         Gist each of the multiple spans (split by max_length).
         """
+        device = input_ids.device
         span_size = self.max_length
         assert (
             input_ids.shape[1] % span_size == 0
-        ), f"Input length must be a multiple of max_length."
+        ), "Input length must be a multiple of max_length."
 
         multi_span_input_ids = input_ids.split(span_size, dim=1)
         multi_span_attention_mask = attention_mask.split(span_size, dim=1)
@@ -210,91 +224,33 @@ class MultiSpanGistCausalLM(nn.Module):
             gist_feats = self.gist_model(span_input_ids, span_attention_mask)
             multi_span_gist_features.append(gist_feats)
 
-        return multi_span_gist_features
+        return (
+            multi_span_gist_features,
+            multi_span_input_ids,
+            multi_span_attention_mask,
+        )
 
-    def prepare_auto_encoding(
+    def forward_objective(
         self,
         multi_span_gist_features: list[torch.Tensor],
         multi_span_context_ids: list[torch.Tensor],
         multi_span_context_embeds: list[torch.Tensor],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
-        """
-        Example: building inputs_embeds & labels that incorporate gist tokens + flags + context.
-        """
-        multi_inputs_embeds = []
-        multi_labels = []
-
-        batch_size, context_length = multi_span_context_ids[0].shape
-        position_ids = self._prepare_ae_position_ids(batch_size, context_length)
-        multi_position_ids = [position_ids] * len(multi_span_gist_features)
-
-        # Prepare AE labels for each chunk
-        for context_ids in multi_span_context_ids:
-            labels = self._prepare_ae_labels(
-                batch_size,
-                context_ids,
+        task: str,
+        device: torch.device,
+    ):
+        if task == "auto_encoding":
+            return auto_encoding.forward_auto_encoding(
+                multi_span_gist_features,
+                multi_span_context_ids,
+                multi_span_context_embeds,
                 self.num_gist_tokens,
+                self.max_length,
                 self.num_auto_encoding_flag,
+                self.auto_encoding_embedding,
+                device=device,
             )
-            multi_labels.append(labels)
-
-        # Prepare AE inputs_embeds for each chunk
-        for span_gist_features, context_embeds in zip(
-            multi_span_gist_features, multi_span_context_embeds
-        ):
-            # gist + flags + context
-            inputs_embeds = torch.cat(
-                [
-                    span_gist_features,
-                    self.auto_encoding_embedding.repeat(batch_size, 1, 1),
-                    context_embeds,
-                ],
-                dim=1,
-            )
-            multi_inputs_embeds.append(inputs_embeds)
-
-        return multi_inputs_embeds, multi_labels, multi_position_ids
-
-    def _prepare_ae_labels(
-        self,
-        batch_size: int,
-        input_ids: torch.Tensor,
-        num_gist_tokens: int,
-        num_auto_encoding_flag: int,
-    ) -> torch.Tensor:
-        """
-        In auto-encoding, gist tokens and flags typically won't be predicted (=-100).
-        """
-        labels = input_ids.clone()
-        blank_prefix = torch.full(
-            (batch_size, num_gist_tokens + num_auto_encoding_flag), -100
-        )
-        labels = torch.cat([blank_prefix, labels], dim=1)
-        return labels
-
-    def _prepare_ae_position_ids(
-        self, batch_size: int, context_length: int
-    ) -> torch.Tensor:
-        """
-        Example of building position IDs (if needed).
-        """
-        context_position_ids = (
-            torch.arange(0, context_length).unsqueeze(0).expand(batch_size, -1)
-        )
-        auto_encoding_position_ids = torch.zeros(
-            (batch_size, self.num_auto_encoding_flag), dtype=torch.long
-        )
-        gist_step = self.max_length // self.num_gist_tokens
-        gist_position_ids = (
-            torch.arange(0, self.max_length, gist_step)
-            .unsqueeze(0)
-            .expand(batch_size, -1)
-        )
-
-        position_ids = torch.cat(
-            [gist_position_ids, auto_encoding_position_ids, context_position_ids], dim=1
-        )
-        return position_ids
+        else:
+            raise ValueError(f"Unknown task: {task}")
 
 
 if __name__ == "__main__":
@@ -304,37 +260,42 @@ if __name__ == "__main__":
     max_length = 512
     num_spans = 3
 
-    print("=== Testing GistCausalLM ===")
-    # Initialize base model and gist model
-    base_model = AutoModelForCausalLM.from_pretrained("gpt2")
-    gist_model = GistCausalLM(base_model, num_gist_tokens=num_gist_tokens, max_length=max_length)
-    
-    # Test single span processing
-    input_ids = torch.randint(0, 50000, (batch_size, max_length))
-    attention_mask = torch.ones(batch_size, max_length)
-    
-    gist_features = gist_model(input_ids=input_ids, attention_mask=attention_mask)
-    print(f"Single span gist features shape: {gist_features.shape}")
-    print(f"Expected: (batch_size={batch_size}, num_gist_tokens={num_gist_tokens}, hidden_size={base_model.config.hidden_size})")
-
-    print("\n=== Testing MultiSpanGistCausalLM ===")
-    # Initialize multi-span model
-    multi_span_model = MultiSpanGistCausalLM(
+    model_config = ModelConfig(
         llm_model_id="gpt2",
         num_gist_tokens=num_gist_tokens,
         max_length=max_length,
         num_auto_encoding_flag=2,
-        num_complete_flag=1
+        num_complete_flag=1,
     )
-    
+
+    print("=== Testing GistCausalLM ===")
+    # Initialize base model and gist model
+    base_model = AutoModelForCausalLM.from_pretrained("gpt2")
+    gist_model = GistCausalLM(
+        base_model, num_gist_tokens=num_gist_tokens, max_length=max_length
+    )
+
+    # Test single span processing
+    input_ids = torch.randint(0, 50000, (batch_size, max_length))
+    attention_mask = torch.ones(batch_size, max_length)
+
+    gist_features = gist_model(input_ids=input_ids, attention_mask=attention_mask)
+    print(f"Single span gist features shape: {gist_features.shape}")
+    print(
+        f"Expected: (batch_size={batch_size}, num_gist_tokens={num_gist_tokens}, hidden_size={base_model.config.hidden_size})"
+    )
+
+    print("\n=== Testing MultiSpanGistCausalLM ===")
+    # Initialize multi-span model
+    multi_span_model = MultiSpanGistCausalLM(**model_config.to_dict())
+
     # Test multi-span processing
     multi_span_input_ids = torch.randint(0, 50000, (batch_size, max_length * num_spans))
     multi_span_attention_mask = torch.ones(batch_size, max_length * num_spans)
-    
+
     # Forward pass through multi-span model
     multi_span_features = multi_span_model(
-        input_ids=multi_span_input_ids,
-        attention_mask=multi_span_attention_mask
+        input_ids=multi_span_input_ids, attention_mask=multi_span_attention_mask
     )
     print(f"Number of spans processed: {len(multi_span_features)}")
     print(f"Each span features shape: {multi_span_features[0].shape}")
@@ -346,16 +307,19 @@ if __name__ == "__main__":
         torch.randint(0, 50000, (batch_size, context_length)) for _ in range(num_spans)
     ]
     multi_span_context_embeds = [
-        torch.randn(batch_size, context_length, base_model.config.hidden_size) 
+        torch.randn(batch_size, context_length, base_model.config.hidden_size)
         for _ in range(num_spans)
     ]
-    
-    multi_inputs_embeds, multi_labels, multi_position_ids = multi_span_model.prepare_auto_encoding(
-        multi_span_features,
-        multi_span_context_ids,
-        multi_span_context_embeds
+
+    multi_inputs_embeds, multi_labels, multi_position_ids = (
+        multi_span_model.forward_objective(
+            multi_span_features,
+            multi_span_context_ids,
+            multi_span_context_embeds,
+            "auto_encoding",
+        )
     )
-    
+
     print("Auto-encoding outputs:")
     print(f"Number of prepared spans: {len(multi_inputs_embeds)}")
     print(f"Inputs embeds shape: {multi_inputs_embeds[0].shape}")
@@ -363,12 +327,21 @@ if __name__ == "__main__":
     print(f"Position ids shape: {multi_position_ids[0].shape}")
 
     # Verify shapes and content
-    expected_embed_length = num_gist_tokens + multi_span_model.num_auto_encoding_flag + context_length
-    assert multi_inputs_embeds[0].shape == (batch_size, expected_embed_length, base_model.config.hidden_size), \
-        "Unexpected inputs_embeds shape"
-    assert multi_labels[0].shape == (batch_size, expected_embed_length), \
-        "Unexpected labels shape"
-    assert multi_position_ids[0].shape == (batch_size, expected_embed_length), \
-        "Unexpected position_ids shape"
-    
+    expected_embed_length = (
+        num_gist_tokens + multi_span_model.num_auto_encoding_flag + context_length
+    )
+    assert multi_inputs_embeds[0].shape == (
+        batch_size,
+        expected_embed_length,
+        base_model.config.hidden_size,
+    ), "Unexpected inputs_embeds shape"
+    assert multi_labels[0].shape == (
+        batch_size,
+        expected_embed_length,
+    ), "Unexpected labels shape"
+    assert multi_position_ids[0].shape == (
+        batch_size,
+        expected_embed_length,
+    ), "Unexpected position_ids shape"
+
     print("\nAll tests passed successfully!")

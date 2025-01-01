@@ -1,0 +1,22 @@
+model_config:
+  llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  num_gist_tokens: 8
+  max_length: 32
+  num_auto_encoding_flag: 1
+  num_complete_flag: 1
+  objectives:
+    - "auto_encoding"
+
+trainer_config:
+  optimizer_config:
+    lr: 1e-4
+    weight_decay: 0.1
+  lightning_trainer_config:
+    max_epochs: 1
+    precision: "bf16-true"
+    gradient_clip_val: 1.0
+    log_every_n_steps: 5
+    val_check_interval: 500
+    limit_val_batches: 100
+    devices: -1
+    strategy: "ddp"
