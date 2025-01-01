@@ -4,6 +4,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import torch.nn.functional as F
 from omegaconf import OmegaConf
+from loguru import logger
 
 
 class LitModel(L.LightningModule):
@@ -22,14 +23,23 @@ class LitModel(L.LightningModule):
         self.tokenizer.add_special_tokens({"pad_token": "<pad>"})
 
     def configure_model(self):
+        logger.info("Loading model...")
         self.model = MultiSpanGistCausalLM(
             **self.model_config,
         )
+        logger.info("Loading target model...")
         self.target_model = AutoModelForCausalLM.from_pretrained(
             self.model_config.llm_model_id
         )
+        logger.info("Resizing token embeddings...")
         self.model.resize_token_embeddings(len(self.tokenizer))
         self.target_model.resize_token_embeddings(len(self.tokenizer))
+        logger.info("Freezing target model...")
+        self.freeze_model(self.target_model)
+
+    def freeze_model(self, model: torch.nn.Module):
+        for param in model.parameters():
+            param.requires_grad = False
 
     def ce_loss(self, logits, labels):
         logits = logits[:, :-1, :].contiguous()
@@ -84,23 +94,24 @@ class LitModel(L.LightningModule):
     def training_step(self, batch, batch_idx):
         losses = self.forward(batch)
         for task, loss in losses.items():
-            self.log(f"train/{task}_loss", loss)
+            self.log(f"train/{task}_loss", loss, on_step=True, on_epoch=True)
         loss = sum(losses.values())
-        self.log("train/total_loss", loss)
+        self.log("train/total_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
         losses = self.forward(batch)
         for task, loss in losses.items():
-            self.log(f"val/{task}_loss", loss)
+            self.log(f"val/{task}_loss", loss, on_step=True, on_epoch=True)
         loss = sum(losses.values())
-        self.log("val/total_loss", loss)
+        self.log("val/total_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def configure_optimizers(self):
         """
         Returns AdamW optimizer for both LoRA parameters and the learnable tokens.
         """
+        logger.info(f"Configuring optimizer...: {self.optimizer_config}")
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
         optimizer = torch.optim.AdamW(trainable_params, **self.optimizer_config)
         return {"optimizer": optimizer}

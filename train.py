@@ -5,8 +5,11 @@ from lightning import Trainer as LTrainer
 from omegaconf import OmegaConf
 import argparse
 from torch.utils.data import DataLoader
+from lightning.pytorch.loggers import WandbLogger
 
 logger.add("logs/train.log")
+
+wandb_logger = WandbLogger(project="Condense")
 
 
 def get_args():
@@ -39,15 +42,34 @@ def main():
     train_dataset = split["train"]
     validation_dataset = split["test"]
 
-    train_dataset = PretrainDataset(train_dataset, lit_model.tokenizer, 2048)
-    validation_dataset = PretrainDataset(validation_dataset, lit_model.tokenizer, 2048)
+    train_dataset = PretrainDataset(
+        train_dataset,
+        lit_model.tokenizer,
+        config.trainer_config.data_config.max_length,
+    )
+    validation_dataset = PretrainDataset(
+        validation_dataset,
+        lit_model.tokenizer,
+        config.trainer_config.data_config.max_length,
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-    validation_loader = DataLoader(validation_dataset, batch_size=16, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.trainer_config.data_config.batch_size,
+        num_workers=config.trainer_config.data_config.num_workers,
+        shuffle=True,
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=1,
+        num_workers=config.trainer_config.data_config.num_workers,
+        shuffle=False,
+    )
 
     logger.info("Initializing trainer...")
     trainer = LTrainer(
         **config.trainer_config.lightning_trainer_config,
+        logger=wandb_logger,
     )
 
     logger.info("Training model...")

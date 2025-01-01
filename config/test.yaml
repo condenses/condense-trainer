@@ -1,13 +1,17 @@
 model_config:
   llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
-  num_gist_tokens: 8
-  max_length: 32
+  num_gist_tokens: 16
+  max_length: 128
   num_auto_encoding_flag: 1
   num_complete_flag: 1
   objectives:
     - "auto_encoding"
 
 trainer_config:
+  data_config:
+    max_length: 512
+    batch_size: 1
+    num_workers: 16
   optimizer_config:
     lr: 1e-4
     weight_decay: 0.1
@@ -19,4 +23,4 @@ trainer_config:
     val_check_interval: 500
     limit_val_batches: 100
     devices: -1
-    strategy: "ddp"
+    strategy: "ddp_find_unused_parameters_true"
