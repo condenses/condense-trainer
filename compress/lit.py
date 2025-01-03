@@ -25,7 +25,7 @@ class LitModel(L.LightningModule):
     def configure_model(self):
         logger.info("Loading model...")
         self.model = MultiSpanGistCausalLM(
-            **self.model_config, 
+            **self.model_config,
         )
         logger.info("Loading target model...")
         self.target_model = AutoModelForCausalLM.from_pretrained(
@@ -36,6 +36,15 @@ class LitModel(L.LightningModule):
         self.target_model.resize_token_embeddings(len(self.tokenizer))
         logger.info("Freezing target model...")
         self.freeze_model(self.target_model)
+
+    def configure_optimizers(self):
+        """
+        Returns AdamW optimizer for both LoRA parameters and the learnable tokens.
+        """
+        logger.info(f"Configuring optimizer...: {self.optimizer_config}")
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        optimizer = torch.optim.AdamW(trainable_params, **self.optimizer_config)
+        return {"optimizer": optimizer}
 
     def freeze_model(self, model: torch.nn.Module):
         for param in model.parameters():
@@ -61,27 +70,35 @@ class LitModel(L.LightningModule):
         losses = {}
         for task in self.model_config.objectives:
             task_losses = []
-            multi_inputs_embeds, multi_labels, multi_position_ids = (
-                self.model.forward_objective(
-                    multi_span_gist_features,
-                    multi_span_context_ids,
-                    multi_span_context_embeds,
-                    task,
-                    device=self.device,
-                )
+            (
+                multi_inputs_embeds,
+                multi_labels,
+                multi_position_ids,
+                multi_attention_masks,
+            ) = self.model.forward_objective(
+                multi_span_gist_features,
+                multi_span_context_ids,
+                multi_span_context_embeds,
+                multi_span_attention_mask,
+                task,
+                device=self.device,
             )
-            for inputs_embeds, labels, position_ids in zip(
-                multi_inputs_embeds, multi_labels, multi_position_ids
+            for inputs_embeds, labels, position_ids, attention_mask in zip(
+                multi_inputs_embeds,
+                multi_labels,
+                multi_position_ids,
+                multi_attention_masks,
             ):
-                loss = self.get_loss(inputs_embeds, labels, position_ids)
+                loss = self.get_loss(
+                    inputs_embeds, labels, position_ids, attention_mask
+                )
                 task_losses.append(loss)
             loss = sum(task_losses) / len(task_losses)
             losses[task] = loss
         return losses
 
-    def get_loss(self, inputs_embeds, labels, position_ids):
+    def get_loss(self, inputs_embeds, labels, position_ids, attention_mask):
         labels[labels == self.tokenizer.pad_token_id] = -100
-        attention_mask = torch.ones_like(labels).to(self.device)
         outputs = self.target_model(
             inputs_embeds=inputs_embeds,
             labels=labels,
@@ -106,12 +123,3 @@ class LitModel(L.LightningModule):
         loss = sum(losses.values())
         self.log("val/total_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
-
-    def configure_optimizers(self):
-        """
-        Returns AdamW optimizer for both LoRA parameters and the learnable tokens.
-        """
-        logger.info(f"Configuring optimizer...: {self.optimizer_config}")
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable_params, **self.optimizer_config)
-        return {"optimizer": optimizer}

@@ -215,7 +215,6 @@ class MultiSpanGistCausalLM(nn.Module):
         """
         Gist each of the multiple spans (split by max_length).
         """
-        device = input_ids.device
         span_size = self.max_length
         assert (
             input_ids.shape[1] % span_size == 0
@@ -243,6 +242,7 @@ class MultiSpanGistCausalLM(nn.Module):
         multi_span_gist_features: list[torch.Tensor],
         multi_span_context_ids: list[torch.Tensor],
         multi_span_context_embeds: list[torch.Tensor],
+        multi_span_attention_mask: list[torch.Tensor],
         task: str,
         device: torch.device,
     ):
@@ -251,6 +251,7 @@ class MultiSpanGistCausalLM(nn.Module):
                 multi_span_gist_features,
                 multi_span_context_ids,
                 multi_span_context_embeds,
+                multi_span_attention_mask,
                 self.num_gist_tokens,
                 self.max_length,
                 self.num_auto_encoding_flag,

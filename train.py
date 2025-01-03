@@ -6,6 +6,7 @@ from omegaconf import OmegaConf
 import argparse
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.callbacks import ModelCheckpoint
 
 logger.add("logs/train.log")
 
@@ -70,6 +71,16 @@ def main():
     trainer = LTrainer(
         **config.trainer_config.lightning_trainer_config,
         logger=wandb_logger,
+        callbacks=[
+            ModelCheckpoint(
+                save_top_k=1,  # Save the best checkpoint
+                save_last=True,  # Save the last checkpoint
+                every_n_epochs=1,  # Save every epoch
+                save_on_train_epoch_end=False,
+                monitor="val/total_loss",
+                mode="min",
+            )
+        ],
     )
 
     logger.info("Training model...")

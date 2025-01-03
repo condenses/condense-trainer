@@ -5,6 +5,7 @@ def forward_auto_encoding(
     multi_span_gist_features: list[torch.Tensor],
     multi_span_context_ids: list[torch.Tensor],
     multi_span_context_embeds: list[torch.Tensor],
+    multi_span_attention_mask: list[torch.Tensor],
     num_gist_tokens: int,
     max_length: int,
     num_auto_encoding_flag: int,
@@ -16,7 +17,7 @@ def forward_auto_encoding(
     """
     multi_inputs_embeds = []
     multi_labels = []
-
+    multi_attention_masks = []
     batch_size, context_length = multi_span_context_ids[0].shape
     position_ids = _prepare_ae_position_ids(
         batch_size, context_length, num_gist_tokens, max_length, num_auto_encoding_flag
@@ -34,8 +35,8 @@ def forward_auto_encoding(
         multi_labels.append(labels)
 
     # Prepare AE inputs_embeds for each chunk
-    for span_gist_features, context_embeds in zip(
-        multi_span_gist_features, multi_span_context_embeds
+    for span_gist_features, context_embeds, attention_mask in zip(
+        multi_span_gist_features, multi_span_context_embeds, multi_span_attention_mask
     ):
         # gist + flags + context
         inputs_embeds = torch.cat(
@@ -46,9 +47,18 @@ def forward_auto_encoding(
             ],
             dim=1,
         )
+        attention_mask = torch.cat(
+            [
+                torch.ones(batch_size, num_gist_tokens + num_auto_encoding_flag).to(
+                    device
+                ),
+                attention_mask,
+            ],
+            dim=1,
+        )
         multi_inputs_embeds.append(inputs_embeds)
-
-    return multi_inputs_embeds, multi_labels, multi_position_ids
+        multi_attention_masks.append(attention_mask)
+    return multi_inputs_embeds, multi_labels, multi_position_ids, multi_attention_masks
 
 
 def _prepare_ae_labels(
@@ -79,7 +89,7 @@ def _prepare_ae_position_ids(
     Example of building position IDs (if needed).
     """
     context_position_ids = (
-        torch.arange(0, context_length).unsqueeze(0).expand(batch_size, -1)
+        torch.arange(1, context_length + 1).unsqueeze(0).expand(batch_size, -1)
     )
     auto_encoding_position_ids = torch.zeros(
         (batch_size, num_auto_encoding_flag), dtype=torch.long

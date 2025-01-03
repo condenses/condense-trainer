@@ -1,7 +1,8 @@
 model_config:
-  llm_model_id: "meta-llama/Llama-3.1-8B-Instruct"
+  # llm_model_id: "meta-llama/Llama-3.1-1B-Instruct"
+  llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
   num_gist_tokens: 128
-  max_length: 512
+  max_length: 256
   num_auto_encoding_flag: 1
   num_complete_flag: 1
   objectives:
@@ -9,8 +10,8 @@ model_config:
   peft_config:
     task_type: "CAUSAL_LM"
     inference_mode: false
-    r: 64
-    lora_alpha: 128
+    r: 256
+    lora_alpha: 256
     lora_dropout: 0.1
     bias: "none"
     target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
