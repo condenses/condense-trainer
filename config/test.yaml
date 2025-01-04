@@ -20,7 +20,7 @@ model_config:
 
 trainer_config:
   data_config:
-    max_length: 512
+    max_length: 1024
     batch_size: 1
     num_workers: 16
   optimizer_config:
@@ -34,4 +34,4 @@ trainer_config:
     val_check_interval: 500
     limit_val_batches: 100
     devices: -1
-    strategy: "ddp_find_unused_parameters_false"
+    strategy: "deepspeed_stage_2_offload"

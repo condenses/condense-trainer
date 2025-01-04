@@ -111,6 +111,7 @@ class MultiSpanGistCausalLM(nn.Module):
         **kwargs,
     ):
         super().__init__()
+        print("Loading llm model...: {}".format(llm_model_id))
         self.model = AutoModelForCausalLM.from_pretrained(llm_model_id)
         self.num_gist_tokens = num_gist_tokens
         self.max_length = max_length
@@ -147,13 +148,30 @@ class MultiSpanGistCausalLM(nn.Module):
             input_ids.shape[1] % span_size == 0
         ), "Input length must be a multiple of max_length."
 
-        multi_span_input_ids = input_ids.split(span_size, dim=1)
-        multi_span_attention_mask = attention_mask.split(span_size, dim=1)
+        multi_span_input_ids: tuple[torch.Tensor] = input_ids.split(span_size, dim=1)
+        multi_span_attention_mask: tuple[torch.Tensor] = attention_mask.split(
+            span_size, dim=1
+        )
+
+        def check_not_all_padding(span_input_ids, padding_id):
+            return not torch.all(span_input_ids == padding_id)
+
+        multi_span_input_ids = [
+            span_input_ids
+            for span_input_ids in multi_span_input_ids
+            if check_not_all_padding(span_input_ids, padding_id)
+        ]
+        multi_span_attention_mask = [
+            span_attention_mask
+            for span_attention_mask in multi_span_attention_mask
+            if check_not_all_padding(span_attention_mask, 0)
+        ]
+
         for i, (span_input_ids, span_attention_mask) in enumerate(
             zip(multi_span_input_ids, multi_span_attention_mask)
         ):
-            if span_input_ids.all() == padding_id:
-                # Drop this span
+            # Drop this span if all input ids are padding
+            if torch.all(span_input_ids == padding_id):
                 multi_span_input_ids.pop(i)
                 multi_span_attention_mask.pop(i)
 

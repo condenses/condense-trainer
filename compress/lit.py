@@ -7,6 +7,7 @@ from huggingface_hub import HfApi
 from omegaconf import OmegaConf
 from loguru import logger
 from cut_cross_entropy.transformers import cce_patch
+from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 
 
 class LitModel(L.LightningModule):
@@ -30,7 +31,9 @@ class LitModel(L.LightningModule):
         self.model = MultiSpanGistCausalLM(
             **self.model_config,
         )
-        logger.info("Loading target model...")
+        logger.info(
+            "Loading target model...: {}".format(self.model_config.llm_model_id)
+        )
         self.target_model = AutoModelForCausalLM.from_pretrained(
             self.model_config.llm_model_id
         )
@@ -53,7 +56,15 @@ class LitModel(L.LightningModule):
         """
         logger.info(f"Configuring optimizer...: {self.optimizer_config}")
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        optimizer = torch.optim.AdamW(trainable_params, **self.optimizer_config)
+        # optimizer = torch.optim.AdamW(trainable_params, **self.optimizer_config)
+        optimizer = DeepSpeedCPUAdam(
+            trainable_params,
+            **self.optimizer_config,
+        )
+        # optimizer = FusedAdam(
+        #     trainable_params,
+        #     **self.optimizer_config,
+        # )
         return {"optimizer": optimizer}
 
     def freeze_model(self, model: torch.nn.Module):
