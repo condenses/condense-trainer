@@ -58,7 +58,15 @@ def forward_auto_encoding(
         )
         multi_inputs_embeds.append(inputs_embeds)
         multi_attention_masks.append(attention_mask)
-    return multi_inputs_embeds, multi_labels, multi_position_ids, multi_attention_masks
+    return (
+        multi_inputs_embeds,
+        multi_labels,
+        multi_position_ids,
+        multi_attention_masks,
+        None,
+        None,
+        None,
+    )
 
 
 def _prepare_ae_labels(

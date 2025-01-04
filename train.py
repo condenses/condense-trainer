@@ -1,12 +1,15 @@
 from compress.lit import LitModel
 from compress.data import PretrainDataset, load_processed_dataset
+from compress.callbacks import SaveModelHuggingface
 from loguru import logger
 from lightning import Trainer as LTrainer
 from omegaconf import OmegaConf
 import argparse
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
+import torch
+
+torch.set_float32_matmul_precision("high")
 
 logger.add("logs/train.log")
 
@@ -20,6 +23,7 @@ def get_args():
     # Create parser with arguments matching config structure
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/test.yaml")
+    parser.add_argument("--model_config.pretrained_id", type=str, default="")
 
     # Convert config to CLI arguments automatically
     cli_config = OmegaConf.from_cli()
@@ -71,16 +75,9 @@ def main():
     trainer = LTrainer(
         **config.trainer_config.lightning_trainer_config,
         logger=wandb_logger,
-        callbacks=[
-            ModelCheckpoint(
-                save_top_k=1,  # Save the best checkpoint
-                save_last=True,  # Save the last checkpoint
-                every_n_epochs=1,  # Save every epoch
-                save_on_train_epoch_end=False,
-                monitor="val/total_loss",
-                mode="min",
-            )
-        ],
+        # callbacks=[
+        #     SaveModelHuggingface(output_dir="checkpoints"),
+        # ],
     )
 
     logger.info("Training model...")

@@ -1,8 +1,11 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, PretrainedConfig
-from .objectives import auto_encoding
-from peft import get_peft_model, LoraConfig
+from .objectives import auto_encoding, completing
+from peft import get_peft_model, LoraConfig, PeftModel
+import os
+from omegaconf import OmegaConf
+from huggingface_hub import HfApi
 
 
 class ModelConfig(PretrainedConfig):
@@ -42,83 +45,20 @@ class GistCausalLM(nn.Module):
         # Register gist tokens as a learnable parameter (one for each chunk).
         hidden_size = self.model.config.hidden_size
         self.gist_tokens = nn.Parameter(torch.randn(num_gist_tokens, hidden_size))
+        self._register_buffer()
 
-        # Precompute and register index maps for attention mask expansion
-        # and gist extraction. We'll store these as buffers so they're
-        # moved automatically to the correct device.
-        self._register_expansion_indices()
-        self._register_gist_indices()
-
-    def _register_expansion_indices(self):
-        """
-        Precompute the index mapping needed to expand the attention mask
-        by inserting gist positions after each chunk.
-        """
-        # Example:
-        #   T = self.max_length
-        #   chunk_size = self.compress_ratio
-        #   total_chunks = T // chunk_size == self.num_gist_tokens
-        chunk_size = self.compress_ratio
-        total_chunks = self.num_gist_tokens  # same as T // chunk_size
-
-        idx_map = []
-        gist_positions = []
-        offset = 0
-        for chunk_idx in range(total_chunks):
-            start_pos = chunk_idx * chunk_size
-            end_pos = start_pos + chunk_size
-            # Original token positions
-            idx_map.extend(range(start_pos, end_pos))
-            # Gist position comes after each chunk
-            gist_positions.append(end_pos + offset)
-            offset += 1
-
-        idx_map = torch.tensor(idx_map, dtype=torch.long)
-        gist_positions = torch.tensor(gist_positions, dtype=torch.long)
-
-        self.register_buffer("attention_idx_map", idx_map)  # [T]
-        self.register_buffer(
-            "attention_gist_positions", gist_positions
-        )  # [num_gist_tokens]
-
-    def _register_gist_indices(self):
-        """
-        Precompute the positions (in the final hidden state) where
-        the gist tokens live (for extraction).
-        """
-        # After expansion, we have T + num_gist_tokens tokens total.
-        # Gist tokens appear at indices:
-        #   [chunk_size, chunk_size+(chunk_size+1), ...] with step=(chunk_size+1)
-        gist_indices = torch.arange(
-            self.compress_ratio,
-            self.max_length + self.num_gist_tokens,
-            step=self.compress_ratio + 1,
-            dtype=torch.long,
+    def _register_buffer(self):
+        # Register position IDs
+        position_ids_with_gist = torch.cat(
+            [
+                torch.arange(0, self.max_length),
+                torch.arange(0, self.max_length, step=self.compress_ratio),
+            ],
+            dim=0,
         )
-        self.register_buffer("gist_indices", gist_indices)
-
-    def _expand_attention_mask(self, attention_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Use precomputed indices to expand the attention mask in one shot.
-        """
-        B, T = attention_mask.shape
-        assert (
-            T == self.max_length
-        ), f"Attention mask length {T} must match max_length {self.max_length}"
-
-        new_length = T + self.num_gist_tokens
-        # Initialize all to 0, then fill in:
-        expanded = torch.zeros(
-            (B, new_length), dtype=attention_mask.dtype, device=attention_mask.device
-        )
-
-        # Place original mask
-        expanded[:, self.attention_idx_map] = attention_mask
-
-        # Place gist token positions to 1
-        expanded[:, self.attention_gist_positions] = 1
-
-        return expanded
+        gist_attention_mask = torch.ones(self.num_gist_tokens)
+        self.register_buffer("position_ids", position_ids_with_gist)
+        self.register_buffer("gist_attention_mask", gist_attention_mask)
 
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
@@ -133,41 +73,24 @@ class GistCausalLM(nn.Module):
 
         # Get input embeddings directly
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
-
-        # [B, T, H] -> [B, num_chunks, chunk_size, H]
-        chunk_size = self.compress_ratio
-        chunked = inputs_embeds.reshape(
-            B, -1, chunk_size, self.model.config.hidden_size
+        inputs_embeds_with_gist = torch.cat(
+            [inputs_embeds, self.gist_tokens.unsqueeze(0).expand(B, -1, -1)], dim=1
         )
-        # ^ shape: (B, num_gist_tokens, chunk_size, H)
-
-        # Expand gist tokens to [B, num_gist_tokens, H], then unsqueeze dim=2
-        # to match the chunk dimension for concatenation.
-        gist_tokens_expanded = self.gist_tokens.unsqueeze(0).expand(B, -1, -1)
-        gist_tokens_expanded = gist_tokens_expanded.unsqueeze(2)
-        # shape: (B, num_gist_tokens, 1, H)
-
-        # Concatenate each chunk with the corresponding gist token along dim=2
-        combined = torch.cat([chunked, gist_tokens_expanded], dim=2)
-        # shape: (B, num_gist_tokens, chunk_size + 1, H)
-
-        # Flatten back to [B, T + num_gist_tokens, H]
-        inputs_embeds = combined.reshape(B, -1, self.model.config.hidden_size)
-
-        # Expand attention mask (now T + num_gist_tokens in length)
-        expanded_attention_mask = self._expand_attention_mask(attention_mask)
-
+        attention_mask_with_gist = torch.cat(
+            [attention_mask, self.gist_attention_mask.repeat(B, 1)], dim=1
+        )
+        position_ids_with_gist = self.position_ids.repeat(B, 1)
         # Forward pass
         outputs = self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=expanded_attention_mask,
+            inputs_embeds=inputs_embeds_with_gist,
+            attention_mask=attention_mask_with_gist,
+            position_ids=position_ids_with_gist,
             output_hidden_states=True,
         )
 
         # Extract gist features from the last hidden state
         last_state = outputs.hidden_states[-1]  # shape: (B, T + num_gist_tokens, H)
-        gist_features = last_state[:, self.gist_indices, :]
-        # shape: (B, num_gist_tokens, H)
+        gist_features = last_state[:, -self.num_gist_tokens :, :]
 
         return gist_features
 
@@ -194,7 +117,11 @@ class MultiSpanGistCausalLM(nn.Module):
         self.gist_model = GistCausalLM(self.model, num_gist_tokens, max_length)
 
         if peft_config is not None:
-            self.model = get_peft_model(self.model, LoraConfig(**peft_config))
+            print(f"Applying PEFT config: {peft_config}")
+            peft_config = OmegaConf.to_container(peft_config)
+            print(type(peft_config))
+            print(type(peft_config["target_modules"]))
+            self.model = get_peft_model(self.model, LoraConfig(**dict(peft_config)))
             self.model.print_trainable_parameters()
 
         # Extra learnable flags
@@ -210,7 +137,7 @@ class MultiSpanGistCausalLM(nn.Module):
         self.model.resize_token_embeddings(new_num_tokens)
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, padding_id: int
     ) -> torch.Tensor:
         """
         Gist each of the multiple spans (split by max_length).
@@ -222,6 +149,13 @@ class MultiSpanGistCausalLM(nn.Module):
 
         multi_span_input_ids = input_ids.split(span_size, dim=1)
         multi_span_attention_mask = attention_mask.split(span_size, dim=1)
+        for i, (span_input_ids, span_attention_mask) in enumerate(
+            zip(multi_span_input_ids, multi_span_attention_mask)
+        ):
+            if span_input_ids.all() == padding_id:
+                # Drop this span
+                multi_span_input_ids.pop(i)
+                multi_span_attention_mask.pop(i)
 
         # Collect gist features for each chunk
         multi_span_gist_features = []
@@ -258,8 +192,54 @@ class MultiSpanGistCausalLM(nn.Module):
                 self.auto_encoding_embedding,
                 device=device,
             )
+        elif task == "completing":
+            return completing.forward_completing(
+                multi_span_gist_features,
+                multi_span_context_ids,
+                multi_span_context_embeds,
+                multi_span_attention_mask,
+                self.num_gist_tokens,
+                self.num_complete_flag,
+                self.lm_embedding,
+                device=device,
+            )
         else:
             raise ValueError(f"Unknown task: {task}")
+
+    def push_to_hub(self, repo_id: str, output_dir: str, hf_api: HfApi):
+        self.model.push_to_hub(repo_id)
+        checkpoint = {
+            "lm_embedding": self.lm_embedding,
+            "auto_encoding_embedding": self.auto_encoding_embedding,
+            "gist_tokens": self.gist_model.gist_tokens,
+        }
+        checkpoint_path = os.path.join(output_dir, "modules.pt")
+        torch.save(checkpoint, checkpoint_path)
+        hf_api.upload_file(
+            path_or_fileobj=checkpoint_path,
+            path_in_repo=checkpoint_path,
+            repo_id=repo_id,
+        )
+
+    def load_pretrained(self, repo_id: str, hf_api: HfApi):
+        checkpoint_path = hf_api.hf_hub_download(
+            repo_id=repo_id, filename="checkpoints/modules.pt"
+        )
+
+        checkpoint = torch.load(
+            checkpoint_path, map_location=self.lm_embedding.device, weights_only=True
+        )
+
+        self.lm_embedding.data = checkpoint["lm_embedding"]
+        self.auto_encoding_embedding.data = checkpoint["auto_encoding_embedding"]
+        self.gist_model.gist_tokens.data = checkpoint["gist_tokens"]
+
+        print("Loading llm model...")
+        self.gist_model.model = PeftModel.from_pretrained(
+            self.gist_model.model, repo_id, is_trainable=True, device_map="auto"
+        )
+
+        self.eval()
 
 
 if __name__ == "__main__":

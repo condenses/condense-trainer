@@ -1,12 +1,14 @@
 model_config:
-  # llm_model_id: "meta-llama/Llama-3.1-1B-Instruct"
-  llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  llm_model_id: "meta-llama/Llama-3.1-8B-Instruct"
+  # llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  pretrained_id: ""
   num_gist_tokens: 128
   max_length: 256
   num_auto_encoding_flag: 1
   num_complete_flag: 1
   objectives:
     - "auto_encoding"
+    - "completing"
   peft_config:
     task_type: "CAUSAL_LM"
     inference_mode: false
@@ -32,4 +34,4 @@ trainer_config:
     val_check_interval: 500
     limit_val_batches: 100
     devices: -1
-    strategy: "ddp_find_unused_parameters_true"
+    strategy: "ddp_find_unused_parameters_false"
