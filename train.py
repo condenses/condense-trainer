@@ -1,78 +1,88 @@
-from condense_trainer_core import LitCondenseLLM, SubnetSyntheticDataset
-from lightning import Trainer
+from compress.lit import LitModel
+from compress.data import PretrainDataset, load_processed_dataset
+from compress.callbacks import SaveModelHuggingface
+from loguru import logger
+from lightning import Trainer as LTrainer
+from omegaconf import OmegaConf
+import argparse
 from torch.utils.data import DataLoader
 from lightning.pytorch.loggers import WandbLogger
 import torch
-import argparse
+
+torch.set_float32_matmul_precision("high")
+
+logger.add("logs/train.log")
+
 wandb_logger = WandbLogger(project="Condense")
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--test", action="store_true", help="Use smaller test models")
-parser.add_argument("--pretrained_id", type=str, default=None, help="HuggingFace repo ID of pretrained model")
-parser.add_argument("--num_condense_tokens", type=int, default=512, help="Number of condense tokens")
-parser.add_argument("--max_tokens", type=int, default=4096, help="Maximum number of tokens")
-parser.add_argument("--max_characters", type=int, default=10000, help="Maximum number of characters")
-parser.add_argument("--batch_size", type=int, default=1, help="Training batch size")
-parser.add_argument("--num_workers", type=int, default=8, help="Number of dataloader workers")
-parser.add_argument("--dataset_id", type=str, default="Condense-AI/benchmark-condense-v0.1", help="Dataset to use")
-parser.add_argument("--model_id", type=str, default=None, help="Model ID to use")
-parser.add_argument("--target_model_id", type=str, default=None, help="Target model ID to use")
-args = parser.parse_args()
 
-num_condense_tokens = args.num_condense_tokens
-max_tokens = args.max_tokens
-max_characters = args.max_characters
+def get_args():
+    # Load default config
+    config = OmegaConf.load("config/test.yaml")
 
-dataset_id = args.dataset_id
-if args.test:
-    model_id = "HuggingFaceTB/SmolLM2-135M"
-    target_model_id = "HuggingFaceTB/SmolLM2-135M"
-else:
-    model_id = args.model_id
-    target_model_id = args.target_model_id
+    # Create parser with arguments matching config structure
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="config/test.yaml")
+    parser.add_argument("--model_config.pretrained_id", type=str, default="")
 
-print(f"Model ID: {model_id}")
-print(f"Target Model ID: {target_model_id}")
-print(f"Pretrained ID: {args.pretrained_id}")
+    # Convert config to CLI arguments automatically
+    cli_config = OmegaConf.from_cli()
 
-if args.pretrained_id is not None:
-    lit_model = LitCondenseLLM.from_pretrained(model_id, target_model_id, args.pretrained_id)
-else:
-    lit_model = LitCondenseLLM(
-        model_id=model_id,
-        target_model_id=target_model_id,
-        num_condense_tokens=num_condense_tokens,
-        n_last_hidden_states=2
+    # Merge configs: CLI values override YAML config
+    config = OmegaConf.merge(config, cli_config)
+
+    return config
+
+
+def main():
+    config = get_args()
+    logger.info(f"Config: {config}")
+    logger.info("Initializing model...")
+    lit_model = LitModel(config)
+
+    logger.info("Loading dataset...")
+    dataset = load_processed_dataset(lit_model.tokenizer)
+
+    split = dataset.train_test_split(test_size=0.1, seed=42)
+    train_dataset = split["train"]
+    validation_dataset = split["test"]
+
+    train_dataset = PretrainDataset(
+        train_dataset,
+        lit_model.tokenizer,
+        config.trainer_config.data_config.max_length,
+    )
+    validation_dataset = PretrainDataset(
+        validation_dataset,
+        lit_model.tokenizer,
+        config.trainer_config.data_config.max_length,
     )
 
-tokenizer = lit_model.tokenizer
-separate_tokenizer = lit_model.separate_tokenizer
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.trainer_config.data_config.batch_size,
+        num_workers=config.trainer_config.data_config.num_workers,
+        shuffle=True,
+    )
+    validation_loader = DataLoader(
+        validation_dataset,
+        batch_size=1,
+        num_workers=config.trainer_config.data_config.num_workers,
+        shuffle=False,
+    )
 
-# Set padding token
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-if separate_tokenizer.pad_token is None:
-    separate_tokenizer.pad_token = separate_tokenizer.eos_token
+    logger.info("Initializing trainer...")
+    trainer = LTrainer(
+        **config.trainer_config.lightning_trainer_config,
+        logger=wandb_logger,
+        # callbacks=[
+        #     SaveModelHuggingface(output_dir="checkpoints"),
+        # ],
+    )
 
-train_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, separate_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens
-)
-validation_dataset = SubnetSyntheticDataset(
-    dataset_id, tokenizer, separate_tokenizer, num_condense_tokens, max_characters, max_length=max_tokens, split="test"
-)
+    logger.info("Training model...")
+    trainer.fit(lit_model, train_loader, validation_loader)
 
-trainer = Trainer(
-    max_epochs=10,
-    precision="bf16",
-    gradient_clip_val=1.0,
-    log_every_n_steps=5,
-    check_val_every_n_epoch=1,
-    logger=wandb_logger,
-    val_check_interval=500,
-    limit_val_batches=100,
-)
 
-train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-validation_loader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
-trainer.fit(lit_model, train_loader, validation_loader)
+if __name__ == "__main__":
+    main()

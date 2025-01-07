@@ -1,0 +1,37 @@
+model_config:
+  llm_model_id: "meta-llama/Llama-3.1-8B-Instruct"
+  # llm_model_id: "HuggingFaceTB/SmolLM2-135M-Instruct"
+  pretrained_id: ""
+  num_gist_tokens: 128
+  max_length: 256
+  num_auto_encoding_flag: 1
+  num_complete_flag: 1
+  objectives:
+    - "auto_encoding"
+    - "completing"
+  peft_config:
+    task_type: "CAUSAL_LM"
+    inference_mode: false
+    r: 256
+    lora_alpha: 256
+    lora_dropout: 0.1
+    bias: "none"
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+trainer_config:
+  data_config:
+    max_length: 1024
+    batch_size: 1
+    num_workers: 16
+  optimizer_config:
+    lr: 1e-4
+    weight_decay: 0.1
+  lightning_trainer_config:
+    max_epochs: 1
+    precision: "bf16-true"
+    gradient_clip_val: 1.0
+    log_every_n_steps: 5
+    val_check_interval: 500
+    limit_val_batches: 100
+    devices: -1
+    strategy: "deepspeed_stage_2_offload"
